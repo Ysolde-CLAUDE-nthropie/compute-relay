@@ -56,6 +56,10 @@ UI_COOKIE = "relay_ui"
 # Cookie-authenticated requests must also carry this header. Cross-site forms
 # cannot set custom headers, so this blocks CSRF even where SameSite doesn't.
 UI_HEADER = "X-Relay-UI"
+# Base URL advertised to browsers and enroll scripts. Empty means "derive it
+# from the bind address", which is only right for local use; behind a proxy set
+# RELAY_PUBLIC_URL=https://relay.example.com.
+PUBLIC_URL = os.environ.get("RELAY_PUBLIC_URL", "").rstrip("/")
 
 
 class State:
@@ -347,6 +351,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_poll(qs)
         if path == "/api/workers":
             return self._handle_workers()
+        if path == "/api/enroll":
+            return self._handle_enroll()
         if path == "/api/jobs":
             return self._handle_jobs_list()
         if path.startswith("/api/jobs/"):
@@ -453,6 +459,27 @@ class Handler(BaseHTTPRequestHandler):
         print("[ui] minted a one-time sign-in link", flush=True)
         self._send_json(200, {"login_token": tok, "path": f"ui#login={tok}",
                               "expires_in": UI_LINK_TTL})
+
+    def _handle_enroll(self):
+        """Return everything the dashboard needs to show a ready-to-paste enroll
+        command: the public base URL and the worker token.
+
+        The worker token is not a secret from the dashboard — it is the token
+        handed to workers, and the dashboard itself sits behind an admin
+        session. The *admin* token is never served here.
+        """
+        if not self._auth("admin"):
+            return
+        self._read_body()
+        base = PUBLIC_URL or ("http://%s:%s" % (
+            self.headers.get("Host", "127.0.0.1").rsplit(":", 1)[0],
+            self.server.server_address[1]))
+        self._send_json(200, {
+            "server": base,
+            "worker_token": TOKENS["worker"],
+            "install_sh": base + "/install.sh",
+            "agent_py": base + "/agent.py",
+        })
 
     def _handle_ui_login(self):
         data = self._read_json()
@@ -781,6 +808,7 @@ README. Web dashboard: /ui (open a sign-in link: `client.py ui`). Endpoints:
   POST /api/jobs                        submit a job                (admin)
   GET  /api/jobs  /api/jobs/<id>        job list / status           (admin)
   GET  /api/workers                     list workers                (admin)
+  GET  /api/enroll                      enroll command + worker tok (admin)
   POST /api/sessions                    open a session              (admin)
   POST /api/sessions/<id>/input         send stdin                  (admin)
   POST /api/sessions/<id>/close         close a session             (admin)
@@ -806,7 +834,7 @@ def main():
     print(f"  admin  token: {TOKENS['admin']}", flush=True)
     print("Give the worker token (with your server URL) to machines you enroll.", flush=True)
     print("Keep the admin token private: it can submit jobs and open sessions.", flush=True)
-    public = os.environ.get("RELAY_PUBLIC_URL", "").rstrip("/") or \
+    public = PUBLIC_URL or \
         f"http://{'127.0.0.1' if host in ('0.0.0.0', '') else host}:{port}"
     print(f"Web dashboard sign-in link (one-time, expires in {UI_LINK_TTL // 60} min):", flush=True)
     print(f"  {public}/ui#login={STATE.mint_ui_link()}", flush=True)

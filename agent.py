@@ -129,7 +129,8 @@ def detect_caps():
             "cpu_count": os.cpu_count()}
     try:
         out = subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
-                             capture_output=True, text=True, timeout=5)
+                             capture_output=True, text=True, encoding="utf-8",
+                             errors="replace", timeout=5)
         if out.returncode == 0 and out.stdout.strip():
             caps["gpus"] = [g.strip() for g in out.stdout.strip().splitlines()]
     except (OSError, subprocess.SubprocessError):
@@ -206,7 +207,7 @@ def run_job(job):
         proc = subprocess.Popen(
             _build_args(command, use_shell), shell=use_shell, cwd=cwd, env=env,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-            bufsize=1, **_group_kwargs())
+            encoding="utf-8", errors="replace", bufsize=1, **_group_kwargs())
     except (OSError, ValueError) as e:
         log(f"job {job_id} failed to start: {e}")
         return post_result(job_id, output_chunk=f"failed to start: {e}\n",
@@ -355,6 +356,37 @@ def _session_argv(command, env):
     return [shell_bin, "-c", command] if command else [shell_bin]
 
 
+def _session_encoding():
+    """Bytes a session's output should be decoded with.
+
+    POSIX terminals emit UTF-8 in practice. On Windows, cmd.exe writes in the
+    console OEM code page (cp936 on Chinese systems), so decoding as UTF-8
+    garbles every non-ASCII character. Prefer the active console code page and
+    fall back to UTF-8.
+    """
+    if not IS_WINDOWS:
+        return "utf-8"
+    try:
+        import ctypes
+        cp = ctypes.windll.kernel32.GetConsoleOutputCP()
+        if cp:
+            return "cp%d" % cp
+    except Exception:
+        pass
+    return "mbcs"
+
+
+def _make_decoder(encoding):
+    """Incremental decoder that survives multi-byte chars split across reads."""
+    try:
+        import codecs
+        dec = codecs.getincrementaldecoder(encoding)(errors="replace")
+    except (LookupError, TypeError):
+        import codecs
+        dec = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    return dec
+
+
 def start_session(ctl):
     session_id = ctl["session_id"]
     command = ctl.get("command")
@@ -377,6 +409,7 @@ def start_session(ctl):
             return _session_failed(session_id, e)
         os.close(slave_fd)
         read_fd = master_fd
+        read_stream = None
 
         def writer(data):
             os.write(master_fd, data)
@@ -394,7 +427,10 @@ def start_session(ctl):
                                     **_group_kwargs())
         except (OSError, ValueError) as e:
             return _session_failed(session_id, e)
-        read_fd = proc.stdout.fileno()
+        read_stream = proc.stdout
+        # On Windows an anonymous pipe's fd is not usable with os.read(); use the
+        # file object's own read(). POSIX keeps os.read() on the raw fd.
+        read_fd = None if IS_WINDOWS else proc.stdout.fileno()
 
         def writer(data):
             proc.stdin.write(data)
@@ -409,19 +445,30 @@ def start_session(ctl):
 
     with sessions_lock:
         sessions[session_id] = {"proc": proc, "writer": writer,
+                                "encoding": _session_encoding(),
                                 "lock": threading.Lock()}
     post_session(session_id, started=True)
 
     def reader():
+        dec = _make_decoder(_session_encoding())
         try:
             while True:
                 try:
-                    data = os.read(read_fd, 4096)
-                except OSError:
+                    if read_stream is not None:
+                        data = read_stream.read(4096)
+                    else:
+                        data = os.read(read_fd, 4096)
+                except (OSError, ValueError):
                     data = b""
                 if not data:
+                    # flush any dangling partial multi-byte sequence
+                    tail = dec.decode(b"", final=True)
+                    if tail:
+                        post_session(session_id, output_chunk=tail)
                     break
-                post_session(session_id, output_chunk=data.decode(errors="replace"))
+                text = dec.decode(data)
+                if text:
+                    post_session(session_id, output_chunk=text)
         finally:
             exit_code = proc.wait()
             with sessions_lock:
@@ -442,7 +489,10 @@ def session_input(ctl):
         return
     try:
         with s["lock"]:
-            s["writer"](ctl.get("data", "").encode())
+            # Encode with the same code page we decode output with, so typing
+            # non-ASCII into a Windows console session arrives intact.
+            s["writer"](ctl.get("data", "").encode(s.get("encoding") or "utf-8",
+                                                   errors="replace"))
     except OSError as e:
         log(f"session {session_id} input failed: {e}")
 
