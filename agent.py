@@ -21,16 +21,17 @@ Configuration (environment variables):
   RELAY_WORKER_TOKEN   shared worker token from the coordinator
   RELAY_WORKER_NAME    optional display name (default: hostname)
 
-Standard library only; POSIX (Linux/macOS). Python 3.8+.
+Standard library only. Runs on Linux, macOS, and Windows (Python 3.8+). On
+POSIX, sessions use a real PTY; on Windows (which has no `termios`/`pty`), they
+fall back to a pipe-backed process, which is fine for line-oriented tools like
+`adb shell`.
 """
 
 import json
 import mimetypes
 import os
 import platform
-import pty
 import queue
-import signal
 import socket
 import subprocess
 import sys
@@ -38,6 +39,16 @@ import threading
 import time
 import urllib.error
 import urllib.request
+
+IS_WINDOWS = os.name == "nt"
+if not IS_WINDOWS:
+    import signal
+
+# A PTY gives real terminal semantics but is POSIX-only (it needs termios).
+# On Windows, or when RELAY_NO_PTY is set (handy for testing the fallback),
+# sessions use plain pipes instead. `pty` itself is imported lazily below so
+# this module imports cleanly on Windows.
+USE_PTY = (not IS_WINDOWS) and not os.environ.get("RELAY_NO_PTY")
 
 SERVER = os.environ.get("RELAY_SERVER", "").rstrip("/")
 TOKEN = os.environ.get("RELAY_WORKER_TOKEN", "")
@@ -157,9 +168,20 @@ def _build_args(command, use_shell):
     return command if isinstance(command, list) else command.split()
 
 
+def _group_kwargs():
+    """Popen kwargs so a job/session can be killed as a whole tree."""
+    if IS_WINDOWS:
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+    return {"start_new_session": True}
+
+
 def kill_tree(proc):
     try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        if IS_WINDOWS:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                           capture_output=True)
+        else:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
     except (ProcessLookupError, PermissionError, OSError):
         try:
             proc.kill()
@@ -184,7 +206,7 @@ def run_job(job):
         proc = subprocess.Popen(
             _build_args(command, use_shell), shell=use_shell, cwd=cwd, env=env,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-            bufsize=1, start_new_session=True)
+            bufsize=1, **_group_kwargs())
     except (OSError, ValueError) as e:
         log(f"job {job_id} failed to start: {e}")
         return post_result(job_id, output_chunk=f"failed to start: {e}\n",
@@ -261,7 +283,7 @@ def run_job_binary(job):
     try:
         proc = subprocess.Popen(
             _build_args(command, use_shell), shell=use_shell, cwd=cwd, env=env,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, **_group_kwargs())
     except (OSError, ValueError) as e:
         put_chunk(artifact_id, b"", error=True)
         return post_result(job_id, output_chunk=f"failed to start: {e}\n",
@@ -318,32 +340,75 @@ def post_session(session_id, output_chunk=None, started=False, done=False,
         log(f"failed to post session output for {session_id}: {e}")
 
 
+def _session_failed(session_id, exc):
+    log(f"session {session_id} failed to start: {exc}")
+    post_session(session_id, output_chunk=f"failed to start: {exc}\n",
+                 done=True, exit_code=-1, error=True)
+
+
+def _session_argv(command, env):
+    """Build the argv to launch a session's process on this platform."""
+    if IS_WINDOWS:
+        shell_bin = os.environ.get("COMSPEC", "cmd.exe")
+        return [shell_bin, "/c", command] if command else [shell_bin]
+    shell_bin = env.get("SHELL") or "/bin/bash"
+    return [shell_bin, "-c", command] if command else [shell_bin]
+
+
 def start_session(ctl):
     session_id = ctl["session_id"]
     command = ctl.get("command")
     cwd = ctl.get("cwd") or None
     env = os.environ.copy()
     env.update({str(k): str(v) for k, v in (ctl.get("env") or {}).items()})
-    shell_bin = env.get("SHELL") or "/bin/bash"
-    if command:
-        argv = [shell_bin, "-c", command]
-    else:
-        argv = [shell_bin]
+    argv = _session_argv(command, env)
+    log(f"opening session {session_id}: {command or argv[0]!r} "
+        f"({'pty' if USE_PTY else 'pipe'})")
 
-    log(f"opening session {session_id}: {command or shell_bin!r}")
-    master_fd, slave_fd = pty.openpty()
-    try:
-        proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=slave_fd,
-                                stdout=slave_fd, stderr=slave_fd,
-                                start_new_session=True, close_fds=True)
-    except (OSError, ValueError) as e:
-        os.close(master_fd); os.close(slave_fd)
-        log(f"session {session_id} failed to start: {e}")
-        return post_session(session_id, output_chunk=f"failed to start: {e}\n",
-                            done=True, exit_code=-1, error=True)
-    os.close(slave_fd)
+    if USE_PTY:
+        import pty  # POSIX-only; imported lazily so Windows never loads it
+        master_fd, slave_fd = pty.openpty()
+        try:
+            proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=slave_fd,
+                                    stdout=slave_fd, stderr=slave_fd,
+                                    close_fds=True, **_group_kwargs())
+        except (OSError, ValueError) as e:
+            os.close(master_fd); os.close(slave_fd)
+            return _session_failed(session_id, e)
+        os.close(slave_fd)
+        read_fd = master_fd
+
+        def writer(data):
+            os.write(master_fd, data)
+
+        def cleanup():
+            try:
+                os.close(master_fd)
+            except OSError:
+                pass
+    else:
+        try:
+            proc = subprocess.Popen(argv, cwd=cwd, env=env,
+                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT, bufsize=0,
+                                    **_group_kwargs())
+        except (OSError, ValueError) as e:
+            return _session_failed(session_id, e)
+        read_fd = proc.stdout.fileno()
+
+        def writer(data):
+            proc.stdin.write(data)
+            proc.stdin.flush()
+
+        def cleanup():
+            for stream in (proc.stdin, proc.stdout):
+                try:
+                    stream.close()
+                except OSError:
+                    pass
+
     with sessions_lock:
-        sessions[session_id] = {"master": master_fd, "proc": proc,
+        sessions[session_id] = {"proc": proc, "writer": writer,
                                 "lock": threading.Lock()}
     post_session(session_id, started=True)
 
@@ -351,7 +416,7 @@ def start_session(ctl):
         try:
             while True:
                 try:
-                    data = os.read(master_fd, 4096)
+                    data = os.read(read_fd, 4096)
                 except OSError:
                     data = b""
                 if not data:
@@ -361,10 +426,7 @@ def start_session(ctl):
             exit_code = proc.wait()
             with sessions_lock:
                 sessions.pop(session_id, None)
-            try:
-                os.close(master_fd)
-            except OSError:
-                pass
+            cleanup()
             post_session(session_id, done=True, exit_code=exit_code,
                          error=(exit_code != 0))
             log(f"session {session_id} ended (exit {exit_code})")
@@ -380,7 +442,7 @@ def session_input(ctl):
         return
     try:
         with s["lock"]:
-            os.write(s["master"], ctl.get("data", "").encode())
+            s["writer"](ctl.get("data", "").encode())
     except OSError as e:
         log(f"session {session_id} input failed: {e}")
 

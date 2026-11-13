@@ -203,6 +203,15 @@ as noted).
   workers re-register on their next poll. Swap in a datastore if you need
   durable history.
 
+## Platform notes
+
+The agent runs on **Linux, macOS, and Windows**. On POSIX, sessions use a real
+PTY (full terminal semantics). Windows has no `termios`/`pty`, so there sessions
+fall back to a **pipe-backed** process — no prompt echo or TTY-only behavior,
+but line-oriented tools like `adb shell` work fine. Set `RELAY_NO_PTY=1` to force
+the pipe path on POSIX too. One-shot jobs, artifacts, and the server/client are
+fully cross-platform.
+
 ## Limitations
 
 - In-memory state (no persistence across coordinator restarts).
