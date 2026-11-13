@@ -45,6 +45,7 @@ Think "a minimal self-hosted CI-runner pool," not magic. It is:
 - `agent.py` — the worker. Registers, long-polls for jobs, runs them, streams
   output back. Reconnects with backoff.
 - `client.py` — your CLI to submit jobs and inspect workers/results.
+- `ui.html` — the web dashboard, served by the coordinator at `/ui`.
 - `install.sh` — the worker bootstrap the coordinator serves at `/install.sh`.
 
 ## 1. Deploy the coordinator (server side)
@@ -123,6 +124,30 @@ Useful flags on `run`/`submit`:
 - `--no-shell` exec the argv directly instead of through a shell
 - `--label <text>` a human label for the job
 
+### Web dashboard
+
+The coordinator also serves a browser dashboard at **`/ui`**
+(e.g. `https://relay.example.com/ui`). Sign in with the admin token. From the
+dashboard you can:
+
+- **Workers**: who's online or busy, their platform, CPUs and GPUs, plus the
+  enroll one-liner for new machines.
+- **Jobs**: submit commands (target, timeout, env, cwd, file uploads, binary
+  stdout), watch output stream live, filter and search history, and re-run a
+  job with edits.
+- **Sessions**: open a PTY session on a worker and drive it from a terminal
+  pane, with line history, `^C`, `^D` and Tab.
+- **Artifacts**: pull files, take screenshots, and preview images, video and
+  text inline or download them.
+
+It's a single static file (`ui.html`) with no build step and no external
+requests. The page carries no secrets; every call it makes uses the admin
+token you enter, and the token is kept only in that browser tab's
+`sessionStorage`. The coordinator serves it with a strict Content-Security-Policy
+(the page's script pinned by hash, same-origin requests only), so text
+reported by workers can only ever be displayed, never executed. Serve the
+coordinator over HTTPS so the token isn't sent in the clear.
+
 ## 4. Stateful sessions (interactive debugging)
 
 A **session** is a long-lived PTY-backed process on a specific worker. Input you
@@ -183,6 +208,7 @@ as noted).
 | method & path | token | purpose |
 |---------------|-------|---------|
 | `GET /healthz` | — | liveness |
+| `GET /ui` | — (page) / admin (API) | web dashboard |
 | `GET /install.sh`, `GET /agent.py` | — | worker bootstrap |
 | `POST /api/register` | worker | enroll, returns `worker_id` |
 | `GET /api/poll?worker_id=` | worker | long-poll for the next job |

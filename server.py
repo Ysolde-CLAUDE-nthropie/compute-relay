@@ -23,9 +23,12 @@ or self-propagation. Only run workers against a coordinator you trust, and only
 enroll machines you own or have explicit permission to use.
 """
 
+import base64
 import collections
+import hashlib
 import json
 import os
+import re
 import secrets
 import threading
 import time
@@ -35,6 +38,7 @@ from urllib.parse import urlparse, parse_qs
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOKENS_FILE = os.environ.get("RELAY_TOKENS_FILE", os.path.join(HERE, "relay-tokens.json"))
+UI_FILE = os.path.join(HERE, "ui.html")
 
 # How long a worker's poll request blocks waiting for work before we answer
 # "nothing yet" and let it poll again.
@@ -278,6 +282,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json(200, {"ok": True})
         if path in ("/install.sh", "/agent.py"):
             return self._serve_bootstrap(path)
+        if path in ("/ui", "/ui/"):
+            return self._serve_ui()
         if path == "/api/poll":
             return self._handle_poll(qs)
         if path == "/api/workers":
@@ -330,6 +336,34 @@ class Handler(BaseHTTPRequestHandler):
             body = f.read()
         ctype = "text/x-shellscript" if full.endswith(".sh") else "text/x-python"
         self._send_bytes(200, body, ctype)
+
+    # --- web dashboard -----------------------------------------------
+    def _serve_ui(self):
+        """Serve the admin dashboard. The page itself is public (it holds no
+        secrets); every API call it makes needs the admin token. The CSP pins
+        the page's single inline script by hash and only allows same-origin
+        requests, so worker-reported text can't load or run anything else."""
+        try:
+            with open(UI_FILE, "rb") as f:
+                body = f.read()
+        except OSError:
+            return self._send_json(404, {"error": "ui.html not found"})
+        m = re.search(rb"<script>(.*?)</script>", body, re.S)
+        script = ("'sha256-%s'" % base64.b64encode(hashlib.sha256(m.group(1)).digest()).decode()
+                  if m else "'none'")
+        csp = ("default-src 'none'; script-src %s; style-src 'unsafe-inline'; "
+               "connect-src 'self'; img-src 'self' blob: data:; media-src blob:; "
+               "base-uri 'none'; form-action 'none'; frame-ancestors 'none'" % script)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Content-Security-Policy", csp)
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
 
     # --- worker: enroll + poll ----------------------------------------
     def _handle_register(self):
@@ -428,8 +462,9 @@ class Handler(BaseHTTPRequestHandler):
         if not self._auth("admin"):
             return
         jobs = sorted(STATE.jobs.values(), key=lambda j: j["created_at"], reverse=True)
-        summary = [{k: j[k] for k in ("id", "label", "status", "worker_id",
-                                      "exit_code", "artifacts", "created_at")}
+        summary = [{k: j[k] for k in ("id", "label", "command", "target", "status",
+                                      "worker_id", "exit_code", "artifacts",
+                                      "created_at", "started_at", "finished_at")}
                    for j in jobs]
         self._send_json(200, {"jobs": summary})
 
@@ -615,9 +650,10 @@ HELP_PAGE = """compute-relay coordinator is running.
 
 Self-hosted distributed task runner: one-shot jobs, PTY-backed interactive
 sessions, and binary artifacts (screenshots, recordings). See the repository
-README. Endpoints:
+README. Web dashboard: /ui (sign in with the admin token). Endpoints:
 
   GET  /healthz                         liveness
+  GET  /ui                              web dashboard               (public page, admin API)
   GET  /install.sh  /agent.py           worker bootstrap            (public)
   POST /api/register                    worker enroll               (worker)
   GET  /api/poll                        worker control channel      (worker)
@@ -650,6 +686,7 @@ def main():
     print(f"  admin  token: {TOKENS['admin']}", flush=True)
     print("Give the worker token (with your server URL) to machines you enroll.", flush=True)
     print("Keep the admin token private: it can submit jobs and open sessions.", flush=True)
+    print(f"Web dashboard: http://{host}:{port}/ui (sign in with the admin token)", flush=True)
     print("=" * 64, flush=True)
     try:
         httpd.serve_forever()

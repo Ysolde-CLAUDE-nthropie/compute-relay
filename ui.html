@@ -1,0 +1,1358 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>compute-relay</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%233b5bdb'/%3E%3Cpath d='M8 16h14M17 10l6 6-6 6' stroke='white' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<style>
+:root {
+  --bg: #f5f6f8; --surface: #ffffff; --surface-2: #f0f2f5; --border: #e2e5ea;
+  --text: #151a21; --muted: #677284; --accent: #3b5bdb; --accent-soft: #e7ecfd;
+  --ok: #1d8a4e; --ok-soft: #e3f4ea; --err: #c93a3a; --err-soft: #fbe7e7;
+  --warn: #a96d00; --warn-soft: #fbf0d9; --idle: #7a8494; --idle-soft: #eceef2;
+  --term-bg: #0c0f13; --term-text: #d6dce4;
+  --shadow: 0 1px 2px rgba(16,24,40,.05), 0 1px 3px rgba(16,24,40,.06);
+  --radius: 10px;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1116; --surface: #161b22; --surface-2: #1c222b; --border: #2a313c;
+    --text: #e5e9ef; --muted: #8d98a8; --accent: #7d93ff; --accent-soft: #1f2747;
+    --ok: #3ccf86; --ok-soft: #15301f; --err: #ff6b6b; --err-soft: #3a1b1d;
+    --warn: #f2b84b; --warn-soft: #362a12; --idle: #8a94a3; --idle-soft: #232a33;
+    --shadow: 0 1px 2px rgba(0,0,0,.4);
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 var(--sans); }
+code, pre, .mono { font-family: var(--mono); font-size: 12.5px; }
+a { color: var(--accent); }
+h1, h2, h3 { margin: 0; font-weight: 600; letter-spacing: -.01em; }
+h2 { font-size: 15px; }
+h3 { font-size: 14px; }
+.muted { color: var(--muted); }
+.small { font-size: 12px; }
+
+/* buttons + inputs */
+button, .btn {
+  font: inherit; font-weight: 500; cursor: pointer; border-radius: 7px; padding: 6px 12px;
+  border: 1px solid var(--border); background: var(--surface); color: var(--text);
+  display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;
+}
+button:hover:not(:disabled) { background: var(--surface-2); }
+button:disabled { opacity: .5; cursor: not-allowed; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.primary:hover:not(:disabled) { filter: brightness(1.08); background: var(--accent); }
+button.danger { color: var(--err); }
+button.ghost { border-color: transparent; background: transparent; }
+button.sm { padding: 3px 9px; font-size: 12.5px; }
+button.link { border: 0; background: none; padding: 0; color: var(--accent); font-weight: 500; }
+button.link:hover { text-decoration: underline; background: none; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+input, select, textarea {
+  font: inherit; color: var(--text); background: var(--surface); width: 100%;
+  border: 1px solid var(--border); border-radius: 7px; padding: 7px 10px;
+}
+textarea { resize: vertical; font-family: var(--mono); font-size: 12.5px; }
+input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+label { display: block; font-size: 12px; font-weight: 600; color: var(--muted); margin-bottom: 4px; }
+.field { margin-bottom: 12px; }
+.row { display: flex; gap: 10px; }
+.row > * { flex: 1; min-width: 0; }
+.check { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 500; color: var(--text); margin: 0; }
+.check input { width: auto; }
+.hint { font-size: 12px; color: var(--muted); margin-top: 4px; }
+details.more { margin-bottom: 12px; }
+details.more summary { cursor: pointer; color: var(--muted); font-size: 12.5px; font-weight: 600; margin-bottom: 10px; }
+
+/* login */
+.login { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
+.login-card { width: 100%; max-width: 380px; background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 28px; box-shadow: var(--shadow); }
+.login-card .brand { margin-bottom: 18px; }
+.login-card p { margin: 0 0 18px; color: var(--muted); }
+.error-text { color: var(--err); font-size: 13px; min-height: 18px; margin: 8px 0 0; }
+
+/* top bar */
+.brand { display: flex; align-items: center; gap: 9px; font-weight: 650; font-size: 15px; }
+.brand svg { flex: none; }
+.topbar {
+  position: sticky; top: 0; z-index: 10; display: flex; align-items: center; gap: 20px;
+  padding: 0 20px; height: 54px; background: var(--surface); border-bottom: 1px solid var(--border);
+}
+.tabs { display: flex; gap: 2px; height: 100%; }
+.tabs a {
+  display: flex; align-items: center; gap: 7px; padding: 0 12px; height: 100%; text-decoration: none;
+  color: var(--muted); font-weight: 550; border-bottom: 2px solid transparent;
+}
+.tabs a:hover { color: var(--text); }
+.tabs a[aria-current="page"] { color: var(--text); border-bottom-color: var(--accent); }
+.badge { font-size: 11px; font-weight: 650; padding: 0 6px; border-radius: 9px; background: var(--accent-soft); color: var(--accent); line-height: 17px; }
+.badge:empty { display: none; }
+.topbar .spacer { flex: 1; }
+.sync { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--muted); }
+
+main { max-width: 1280px; margin: 0 auto; padding: 22px 20px 60px; }
+.view-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
+.view-head h1 { font-size: 20px; }
+
+/* cards + layout */
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); }
+.card-pad { padding: 16px; }
+.card > h2 { padding: 14px 16px 0; }
+.split { display: grid; grid-template-columns: 360px minmax(0, 1fr); gap: 18px; align-items: start; }
+.split > .sticky { position: sticky; top: 72px; }
+@media (max-width: 920px) { .split { grid-template-columns: 1fr; } .split > .sticky { position: static; } }
+
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 18px; }
+.stat { padding: 14px 16px; }
+.stat .n { font-size: 24px; font-weight: 650; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+.stat .n small { font-size: 14px; color: var(--muted); font-weight: 500; }
+.stat .l { font-size: 12px; color: var(--muted); font-weight: 600; }
+
+/* status */
+.pill {
+  display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; font-weight: 650;
+  padding: 1px 8px; border-radius: 10px; background: var(--idle-soft); color: var(--idle); text-transform: lowercase;
+}
+.pill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.pill.ok { background: var(--ok-soft); color: var(--ok); }
+.pill.err { background: var(--err-soft); color: var(--err); }
+.pill.warn { background: var(--warn-soft); color: var(--warn); }
+.pill.live { background: var(--accent-soft); color: var(--accent); }
+.pill.live::before { animation: pulse 1.2s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .25; } }
+@media (prefers-reduced-motion: reduce) { .pill.live::before { animation: none; } }
+
+/* workers */
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 14px; }
+.worker { display: flex; flex-direction: column; }
+.worker.offline { opacity: .62; }
+.worker-head { display: flex; align-items: flex-start; gap: 10px; padding: 14px 16px 10px; }
+.worker-head .who { flex: 1; min-width: 0; }
+.worker-head h3 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; margin: 0; padding: 0 16px 12px; font-size: 13px; }
+.kv dt { color: var(--muted); }
+.kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 16px 12px; }
+.chip { font-size: 11.5px; padding: 2px 8px; border-radius: 6px; background: var(--surface-2); border: 1px solid var(--border); }
+.chip.gpu { background: var(--ok-soft); border-color: transparent; color: var(--ok); font-weight: 600; }
+.worker .busy-line { padding: 0 16px 12px; font-size: 13px; }
+.worker footer { margin-top: auto; display: flex; gap: 6px; padding: 10px 16px; border-top: 1px solid var(--border); flex-wrap: wrap; }
+
+.empty { text-align: center; padding: 36px 20px; color: var(--muted); }
+.empty strong { display: block; color: var(--text); font-size: 15px; margin-bottom: 4px; }
+
+.snippet { position: relative; background: var(--term-bg); color: var(--term-text); border-radius: 8px; padding: 12px 14px; padding-right: 76px; overflow-x: auto; white-space: pre; margin: 0; }
+.snippet-wrap { position: relative; }
+.snippet-wrap .copy { position: absolute; top: 8px; right: 8px; background: #232a33; color: #d6dce4; border-color: #39414d; }
+.snippet-wrap .copy:hover { background: #2c3440; }
+.enroll { margin-top: 22px; }
+.enroll ol { margin: 10px 0 0; padding-left: 18px; color: var(--muted); font-size: 13px; }
+
+/* tables */
+.toolbar { display: flex; gap: 8px; align-items: center; padding: 12px 14px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+.toolbar input[type=search] { max-width: 260px; margin-left: auto; padding: 5px 10px; }
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 7px; overflow: hidden; }
+.seg button { border: 0; border-radius: 0; padding: 4px 10px; font-size: 12.5px; color: var(--muted); }
+.seg button + button { border-left: 1px solid var(--border); }
+.seg button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
+.seg .count { font-variant-numeric: tabular-nums; opacity: .75; }
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th { text-align: left; font-size: 11.5px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); font-weight: 650; padding: 9px 14px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+td { padding: 10px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+tbody tr:last-child td { border-bottom: 0; }
+tbody tr.clickable { cursor: pointer; }
+tbody tr.clickable:hover, tbody tr.clickable:focus-visible { background: var(--surface-2); outline: none; }
+td .cmd { font-family: var(--mono); font-size: 12.5px; display: block; max-width: 520px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+td .sub { display: block; color: var(--muted); font-size: 12px; }
+.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.nowrap { white-space: nowrap; }
+
+/* sessions */
+.session-list { list-style: none; margin: 0; padding: 6px; max-height: 420px; overflow-y: auto; }
+.session-list li button {
+  width: 100%; text-align: left; display: block; border: 0; background: none; padding: 9px 10px; border-radius: 7px;
+}
+.session-list li button:hover { background: var(--surface-2); }
+.session-list li button[aria-current="true"] { background: var(--accent-soft); }
+.session-list .top { display: flex; justify-content: space-between; gap: 8px; align-items: center; }
+.session-list .cmd { font-family: var(--mono); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.terminal { display: flex; flex-direction: column; overflow: hidden; }
+.term-head { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+.term-head .title { flex: 1; min-width: 0; }
+.term-head .title code { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.term {
+  margin: 0; background: var(--term-bg); color: var(--term-text); padding: 12px 14px; height: 460px; overflow: auto;
+  white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.4; cursor: text;
+}
+.term-input { display: flex; gap: 6px; padding: 8px; background: var(--term-bg); border-top: 1px solid #222932; }
+.term-input .prompt { color: #7d93ff; font-family: var(--mono); align-self: center; padding: 0 2px 0 6px; }
+.term-input input { background: #12161c; border-color: #2a313c; color: var(--term-text); font-family: var(--mono); font-size: 12.5px; }
+.term-input button { background: #1b2129; color: #c3cad4; border-color: #2f3743; }
+.term-input button:hover:not(:disabled) { background: #252c36; }
+.term-empty { height: 460px; display: grid; place-items: center; text-align: center; color: var(--muted); padding: 20px; }
+
+/* drawer */
+.drawer { position: fixed; inset: 0; z-index: 50; }
+.drawer-scrim { position: absolute; inset: 0; background: rgba(10, 14, 20, .38); }
+.drawer-panel {
+  position: absolute; top: 0; right: 0; bottom: 0; width: min(760px, 100%); background: var(--bg);
+  border-left: 1px solid var(--border); display: flex; flex-direction: column; box-shadow: -8px 0 30px rgba(0,0,0,.15);
+}
+.drawer-head { display: flex; align-items: center; gap: 10px; padding: 14px 18px; background: var(--surface); border-bottom: 1px solid var(--border); }
+.drawer-head h2 { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 16px; }
+.drawer-body { flex: 1; overflow-y: auto; padding: 18px; }
+.drawer-body section { margin-bottom: 18px; }
+.drawer-body h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin-bottom: 8px; }
+.meta { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px 18px; margin: 0; }
+.meta dt { font-size: 12px; color: var(--muted); font-weight: 600; }
+.meta dd { margin: 2px 0 0; overflow-wrap: anywhere; }
+.codeblock { margin: 0; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.output { margin: 0; background: var(--term-bg); color: var(--term-text); border-radius: 8px; padding: 12px 14px; max-height: 52vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.output.empty-out { color: #7b8594; font-style: italic; }
+.art-list { display: grid; gap: 10px; }
+.art { padding: 10px 12px; }
+.art .art-top { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.art .art-top .name { flex: 1; min-width: 0; font-weight: 600; overflow-wrap: anywhere; }
+.preview { margin-top: 10px; }
+.preview img, .preview video { max-width: 100%; max-height: 60vh; display: block; border-radius: 6px; border: 1px solid var(--border); background: repeating-conic-gradient(var(--surface-2) 0 25%, var(--surface) 0 50%) 0 0 / 16px 16px; }
+.drawer-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* toasts */
+#toasts { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); z-index: 100; display: grid; gap: 8px; justify-items: center; pointer-events: none; }
+.toast { pointer-events: auto; background: #1b2028; color: #eef1f5; padding: 9px 14px; border-radius: 8px; font-size: 13px; box-shadow: 0 6px 20px rgba(0,0,0,.25); max-width: min(560px, 92vw); }
+.toast.error { background: #8f2424; }
+
+.dot { width: 9px; height: 9px; border-radius: 50%; flex: none; margin-top: 5px; background: var(--idle); }
+.dot.ok { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); }
+.dot.live { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.dot.err { background: var(--err); }
+</style>
+</head>
+<body>
+
+<div id="login" class="login" hidden>
+  <form id="login-form" class="login-card" autocomplete="off">
+    <div class="brand">
+      <svg width="26" height="26" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" fill="#3b5bdb"/><path d="M8 16h14M17 10l6 6-6 6" stroke="#fff" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      compute-relay
+    </div>
+    <p>Sign in with the coordinator's <strong>admin token</strong>, which <code>server.py</code> prints at startup and saves to <code>relay-tokens.json</code>.</p>
+    <div class="field">
+      <label for="login-token">Admin token</label>
+      <input id="login-token" name="token" type="password" spellcheck="false" autocomplete="off" required>
+    </div>
+    <div class="field">
+      <label class="check"><input type="checkbox" name="remember" checked> Stay signed in for this browser tab</label>
+    </div>
+    <button class="primary" type="submit" style="width:100%; justify-content:center">Connect</button>
+    <p id="login-error" class="error-text" role="alert"></p>
+  </form>
+</div>
+
+<div id="app" hidden>
+  <header class="topbar">
+    <div class="brand">
+      <svg width="22" height="22" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" fill="#3b5bdb"/><path d="M8 16h14M17 10l6 6-6 6" stroke="#fff" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      compute-relay
+    </div>
+    <nav class="tabs" aria-label="Sections">
+      <a href="#/workers" data-tab="workers">Workers <span class="badge" id="badge-workers"></span></a>
+      <a href="#/jobs" data-tab="jobs">Jobs <span class="badge" id="badge-jobs"></span></a>
+      <a href="#/sessions" data-tab="sessions">Sessions <span class="badge" id="badge-sessions"></span></a>
+      <a href="#/artifacts" data-tab="artifacts">Artifacts</a>
+    </nav>
+    <div class="spacer"></div>
+    <div class="sync" id="sync" aria-live="polite"><span class="dot" id="sync-dot"></span><span id="sync-text">Connecting…</span></div>
+    <button class="ghost sm" id="signout" type="button">Sign out</button>
+  </header>
+
+  <main>
+    <!-- Workers -->
+    <section class="view" id="view-workers" hidden>
+      <div class="view-head"><h1>Workers</h1></div>
+      <div class="stats">
+        <div class="card stat"><div class="l">Online</div><div class="n" id="stat-online">–</div></div>
+        <div class="card stat"><div class="l">Busy</div><div class="n" id="stat-busy">–</div></div>
+        <div class="card stat"><div class="l">Queued jobs</div><div class="n" id="stat-pending">–</div></div>
+        <div class="card stat"><div class="l">Open sessions</div><div class="n" id="stat-sessions">–</div></div>
+      </div>
+      <div class="grid" id="worker-grid"></div>
+      <div class="card card-pad enroll">
+        <h2>Enroll a worker</h2>
+        <p class="muted small" style="margin:6px 0 10px">Run this on a machine you own or are authorized to manage. It downloads <code>agent.py</code> and runs it in the foreground.</p>
+        <div class="snippet-wrap">
+          <pre class="snippet" id="enroll-cmd"></pre>
+          <button class="sm copy" type="button" data-copy="enroll-cmd">Copy</button>
+        </div>
+        <ol>
+          <li>Replace <code>YOUR_WORKER_TOKEN</code> with the <em>worker</em> token. The admin token never goes on workers.</li>
+          <li>Set <code>RELAY_WORKER_NAME</code> to give it a stable name (default: hostname).</li>
+        </ol>
+      </div>
+    </section>
+
+    <!-- Jobs -->
+    <section class="view" id="view-jobs" hidden>
+      <div class="view-head"><h1>Jobs</h1></div>
+      <div class="split">
+        <form class="card card-pad sticky" id="job-form" autocomplete="off">
+          <h2 style="margin-bottom:12px">Run a command</h2>
+          <div class="field">
+            <label for="job-command">Command</label>
+            <textarea id="job-command" name="command" rows="3" spellcheck="false" placeholder="nvidia-smi" required></textarea>
+            <div class="hint">⌘/Ctrl + Enter to submit</div>
+          </div>
+          <div class="row">
+            <div class="field">
+              <label for="job-target">Worker</label>
+              <select id="job-target" name="target" data-targets="any"></select>
+            </div>
+            <div class="field">
+              <label for="job-timeout">Timeout (s)</label>
+              <input id="job-timeout" name="timeout" type="number" min="1" step="1" placeholder="none">
+            </div>
+          </div>
+          <div class="field">
+            <label for="job-label">Label</label>
+            <input id="job-label" name="label" placeholder="optional">
+          </div>
+          <details class="more">
+            <summary>Advanced options</summary>
+            <div class="field">
+              <label for="job-cwd">Working directory</label>
+              <input id="job-cwd" name="cwd" spellcheck="false" placeholder="agent default">
+            </div>
+            <div class="field">
+              <label for="job-env">Environment (one KEY=value per line)</label>
+              <textarea id="job-env" name="env" rows="2" spellcheck="false" placeholder="CUDA_VISIBLE_DEVICES=0"></textarea>
+            </div>
+            <div class="field">
+              <label for="job-uploads">Upload files after the job (one path per line)</label>
+              <textarea id="job-uploads" name="uploads" rows="2" spellcheck="false" placeholder="out/report.json"></textarea>
+            </div>
+            <div class="field">
+              <label class="check"><input type="checkbox" name="binary"> Capture stdout as a binary artifact</label>
+            </div>
+            <div class="row" id="job-binary-opts" hidden>
+              <div class="field"><label for="job-bin-name">File name</label><input id="job-bin-name" name="bin_name" placeholder="stdout.bin"></div>
+              <div class="field"><label for="job-bin-type">Content type</label><input id="job-bin-type" name="bin_type" placeholder="application/octet-stream"></div>
+            </div>
+            <div class="field">
+              <label class="check"><input type="checkbox" name="no_shell"> Run without a shell (exec argv directly)</label>
+            </div>
+          </details>
+          <button class="primary" type="submit">Submit job</button>
+        </form>
+
+        <div class="card">
+          <div class="toolbar">
+            <div class="seg" id="job-filter" role="group" aria-label="Filter by status"></div>
+            <input type="search" id="job-search" placeholder="Filter by label, command, id" aria-label="Filter jobs">
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Status</th><th>Job</th><th>Worker</th><th class="num">Exit</th><th class="num">Duration</th><th class="num">Submitted</th></tr></thead>
+              <tbody id="job-rows"></tbody>
+            </table>
+          </div>
+          <div class="empty" id="job-empty" hidden></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Sessions -->
+    <section class="view" id="view-sessions" hidden>
+      <div class="view-head"><h1>Sessions</h1><span class="muted small">Long-lived PTY processes on one worker. State persists between commands.</span></div>
+      <div class="split">
+        <div class="sticky">
+          <form class="card card-pad" id="session-form" autocomplete="off" style="margin-bottom:14px">
+            <h2 style="margin-bottom:12px">Open a session</h2>
+            <div class="field">
+              <label for="session-target">Worker</label>
+              <select id="session-target" name="target" data-targets="online" required></select>
+            </div>
+            <div class="field">
+              <label for="session-command">Command</label>
+              <input id="session-command" name="command" spellcheck="false" placeholder="blank = shell, e.g. adb shell">
+            </div>
+            <div class="field">
+              <label for="session-cwd">Working directory</label>
+              <input id="session-cwd" name="cwd" spellcheck="false" placeholder="agent default">
+            </div>
+            <button class="primary" type="submit">Open session</button>
+          </form>
+          <div class="card">
+            <h2>All sessions</h2>
+            <ul class="session-list" id="session-list"></ul>
+          </div>
+        </div>
+        <div class="card terminal" id="terminal">
+          <div class="term-empty" id="term-empty"><div><strong style="color:var(--text)">No session selected</strong><br>Open a session or pick one from the list.</div></div>
+          <div id="term-live" hidden>
+            <div class="term-head">
+              <div class="title"><code id="term-title"></code><span class="muted small" id="term-sub"></span></div>
+              <span id="term-status"></span>
+              <button class="sm danger" type="button" id="term-close">Close session</button>
+            </div>
+            <pre class="term" id="term-out" tabindex="0" aria-label="Session output"></pre>
+            <form class="term-input" id="term-form" autocomplete="off">
+              <span class="prompt" aria-hidden="true">›</span>
+              <input id="term-line" spellcheck="false" aria-label="Send a line to the session" placeholder="Type a line and press Enter (↑/↓ history)">
+              <button type="button" class="sm" data-key="C-c" title="Send Ctrl-C (interrupt)">^C</button>
+              <button type="button" class="sm" data-key="C-d" title="Send Ctrl-D (EOF)">^D</button>
+              <button type="button" class="sm" data-key="tab" title="Send Tab (completion)">Tab</button>
+            </form>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Artifacts -->
+    <section class="view" id="view-artifacts" hidden>
+      <div class="view-head"><h1>Artifacts</h1><span class="muted small">Held in coordinator memory and cleared on restart.</span></div>
+      <div class="row" style="margin-bottom:18px; flex-wrap:wrap">
+        <form class="card card-pad" id="pull-form" autocomplete="off" style="min-width:280px">
+          <h2 style="margin-bottom:12px">Pull a file</h2>
+          <div class="row">
+            <div class="field"><label for="pull-target">Worker</label><select id="pull-target" name="target" data-targets="online" required></select></div>
+            <div class="field"><label for="pull-name">Save as</label><input id="pull-name" name="name" placeholder="file name"></div>
+          </div>
+          <div class="field"><label for="pull-path">Path on worker</label><input id="pull-path" name="path" spellcheck="false" placeholder="/sdcard/trace.bin" required></div>
+          <button class="primary" type="submit">Pull file</button>
+        </form>
+        <form class="card card-pad" id="shot-form" autocomplete="off" style="min-width:280px">
+          <h2 style="margin-bottom:12px">Screenshot</h2>
+          <div class="field"><label for="shot-target">Worker</label><select id="shot-target" name="target" data-targets="online" required></select></div>
+          <div class="field"><label for="shot-cmd">Capture command (stdout is the PNG)</label><input id="shot-cmd" name="command" spellcheck="false" value="adb exec-out screencap -p" required></div>
+          <button class="primary" type="submit">Capture</button>
+        </form>
+      </div>
+      <div class="card">
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Name</th><th>Status</th><th>Source</th><th>Type</th><th class="num">Size</th><th class="num">Created</th></tr></thead>
+            <tbody id="artifact-rows"></tbody>
+          </table>
+        </div>
+        <div class="empty" id="artifact-empty" hidden><strong>No artifacts yet</strong>Pull a file, take a screenshot, or run a job that captures binary stdout.</div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div id="drawer" class="drawer" hidden>
+  <div class="drawer-scrim" id="drawer-scrim"></div>
+  <aside class="drawer-panel" role="dialog" aria-modal="true" aria-labelledby="drawer-title">
+    <div class="drawer-head">
+      <h2 id="drawer-title"></h2>
+      <span id="drawer-status"></span>
+      <button class="ghost sm" type="button" id="drawer-close" aria-label="Close">✕</button>
+    </div>
+    <div class="drawer-body" id="drawer-body"></div>
+  </aside>
+</div>
+
+<div id="toasts" aria-live="polite"></div>
+
+<script>
+'use strict';
+
+// The UI is served at <prefix>/ui, so API calls resolve against <prefix>/.
+const BASE = location.pathname.replace(/ui\/?$/, '');
+const TOKEN_KEY = 'compute-relay.admin-token';
+const REFRESH_MS = 3000;
+const TABS = ['workers', 'jobs', 'sessions', 'artifacts'];
+
+const state = {
+  token: null,
+  tab: 'workers',
+  workers: [], jobs: [], sessions: [], artifacts: [],
+  loaded: false, lastSync: 0, syncError: null, skew: 0,
+  jobFilter: 'all', jobQuery: '',
+  session: null,          // selected session id
+  term: {},               // session id -> { raw, since, info }
+  termTimer: null, refreshTimer: null,
+  history: [], histPos: 0,
+};
+
+const $ = (sel) => document.querySelector(sel);
+
+// ---------------------------------------------------------------- helpers
+// Build DOM nodes. Text is always inserted as text nodes, never parsed as
+// HTML: job output and worker-reported fields are untrusted.
+function h(tag, attrs, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v == null || v === false) continue;
+    if (k === 'class') el.className = v;
+    else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
+    else if (k === 'value') el.value = v;
+    else el.setAttribute(k, v === true ? '' : v);
+  }
+  for (const kid of kids.flat(Infinity)) {
+    if (kid == null || kid === false) continue;
+    el.append(kid instanceof Node ? kid : String(kid));
+  }
+  return el;
+}
+
+class AuthError extends Error {}
+
+async function api(method, path, body, raw = false) {
+  const opts = { method, cache: 'no-store', headers: { Authorization: `Bearer ${state.token}` } };
+  if (body !== undefined) {
+    opts.headers['Content-Type'] = 'application/json';
+    opts.body = JSON.stringify(body);
+  }
+  const res = await fetch(BASE + path, opts);
+  const date = Date.parse(res.headers.get('Date') || '');
+  if (!Number.isNaN(date)) state.skew = date / 1000 - Date.now() / 1000;
+  if (res.status === 401) throw new AuthError('The coordinator rejected the admin token.');
+  if (raw && res.ok) return res;
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  return data;
+}
+
+function fail(err) {
+  if (err instanceof AuthError) return signOut(err.message);
+  toast(err.message || String(err), 'error');
+}
+
+function toast(msg, kind = '') {
+  const el = h('div', { class: `toast ${kind}`, role: kind === 'error' ? 'alert' : 'status' }, msg);
+  $('#toasts').append(el);
+  setTimeout(() => el.remove(), kind === 'error' ? 6000 : 3200);
+}
+
+const nowS = () => Date.now() / 1000 + state.skew;
+
+function ago(ts) {
+  if (!ts) return '—';
+  const s = Math.max(0, nowS() - ts);
+  if (s < 5) return 'just now';
+  if (s < 60) return `${Math.floor(s)}s ago`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  return `${Math.floor(s / 86400)}d ago`;
+}
+function clock(ts) {
+  return ts ? new Date((ts - state.skew) * 1000).toLocaleString() : '—';
+}
+function duration(start, end) {
+  if (!start) return '—';
+  const s = Math.max(0, (end || nowS()) - start);
+  if (s < 1) return `${Math.round(s * 1000)} ms`;
+  if (s < 60) return `${s.toFixed(1)} s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${Math.floor(s % 60)}s`;
+  return `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+function bytes(n) {
+  if (n == null) return '—';
+  const u = ['B', 'KB', 'MB', 'GB'];
+  let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return `${i ? n.toFixed(1) : n} ${u[i]}`;
+}
+const cmdText = (c) => Array.isArray(c) ? c.join(' ') : (c || '');
+
+const PILL = {
+  done: 'ok', complete: 'ok', open: 'ok', online: 'ok', idle: 'ok',
+  error: 'err', failed: 'err',
+  running: 'live', uploading: 'live', starting: 'live', busy: 'live',
+  pending: 'warn',
+};
+const pill = (status, text) => h('span', { class: `pill ${PILL[status] || ''}` }, text || status);
+
+function workerName(id) {
+  const w = state.workers.find((w) => w.id === id);
+  return w ? w.name : id;
+}
+
+// Strip terminal control sequences so PTY output reads cleanly as text.
+function cleanTerm(s) {
+  s = s.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')   // OSC (window titles)
+       .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')             // CSI (colors, cursor)
+       .replace(/\x1b[()*+][0-~]/g, '')                     // charset selection
+       .replace(/\x1b[^[\]]/g, '')                          // other 2-byte escapes
+       .replace(/\r+\n/g, '\n');
+  let prev;
+  do { prev = s; s = s.replace(/[^\n\x08]\x08/g, ''); } while (s !== prev);
+  s = s.split('\n').map((line) => {
+    if (!line.includes('\r')) return line;
+    let out = '';
+    for (const seg of line.split('\r')) out = seg + out.slice(seg.length);
+    return out;
+  }).join('\n');
+  return s.replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '');
+}
+
+function nearBottom(el) { return el.scrollHeight - el.scrollTop - el.clientHeight < 40; }
+
+async function copyText(text, btn) {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const ta = h('textarea', { style: 'position:fixed;opacity:0' }, text);
+    document.body.append(ta); ta.select();
+    try { document.execCommand('copy'); } finally { ta.remove(); }
+  }
+  if (btn) { const t = btn.textContent; btn.textContent = 'Copied'; setTimeout(() => { btn.textContent = t; }, 1400); }
+}
+
+function storage() {
+  try { return window.sessionStorage; } catch { return null; }
+}
+
+// ---------------------------------------------------------------- auth
+function showLogin(message) {
+  $('#app').hidden = true;
+  $('#drawer').hidden = true;
+  $('#login').hidden = false;
+  $('#login-error').textContent = message || '';
+  $('#login-token').focus();
+}
+
+async function signIn(token, remember) {
+  state.token = token;
+  await api('GET', 'api/workers');
+  if (remember) { try { storage()?.setItem(TOKEN_KEY, token); } catch {} }
+  $('#login').hidden = true;
+  $('#app').hidden = false;
+  $('#login-token').value = '';
+  route();
+  refresh();
+}
+
+function signOut(message) {
+  clearTimeout(state.refreshTimer);
+  clearTimeout(state.termTimer);
+  try { storage()?.removeItem(TOKEN_KEY); } catch {}
+  Object.assign(state, { token: null, workers: [], jobs: [], sessions: [], artifacts: [],
+                         loaded: false, term: {}, session: null });
+  closeDrawer(false);
+  showLogin(message);
+}
+
+$('#login-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  const token = String(fd.get('token') || '').trim();
+  if (!token) return;
+  const btn = e.target.querySelector('button[type=submit]');
+  btn.disabled = true;
+  $('#login-error').textContent = '';
+  try {
+    await signIn(token, fd.get('remember') === 'on');
+  } catch (err) {
+    state.token = null;
+    $('#login-error').textContent = err instanceof AuthError
+      ? 'That token was rejected. Use the admin token, not the worker token.'
+      : `Could not reach the coordinator: ${err.message}`;
+  } finally {
+    btn.disabled = false;
+  }
+});
+$('#signout').addEventListener('click', () => signOut());
+
+// ---------------------------------------------------------------- data
+async function refresh() {
+  clearTimeout(state.refreshTimer);
+  if (!state.token) return;
+  if (!document.hidden) {
+    try {
+      const [w, j, s, a] = await Promise.all([
+        api('GET', 'api/workers'), api('GET', 'api/jobs'),
+        api('GET', 'api/sessions'), api('GET', 'api/artifacts'),
+      ]);
+      if (!state.token) return;
+      state.workers = w.workers || [];
+      state.jobs = j.jobs || [];
+      state.sessions = s.sessions || [];
+      state.artifacts = a.artifacts || [];
+      state.loaded = true;
+      state.lastSync = Date.now();
+      state.syncError = null;
+      render();
+    } catch (err) {
+      if (err instanceof AuthError) return signOut(err.message);
+      state.syncError = err.message || 'unreachable';
+    }
+    renderSync();
+  }
+  state.refreshTimer = setTimeout(refresh, REFRESH_MS);
+}
+const refreshSoon = () => { clearTimeout(state.refreshTimer); state.refreshTimer = setTimeout(refresh, 250); };
+document.addEventListener('visibilitychange', () => { if (!document.hidden && state.token) refresh(); });
+
+function renderSync() {
+  const dot = $('#sync-dot'), text = $('#sync-text');
+  if (state.syncError) {
+    dot.className = 'dot err';
+    text.textContent = `Reconnecting (${state.syncError})`;
+  } else if (state.lastSync) {
+    dot.className = 'dot ok';
+    const s = Math.round((Date.now() - state.lastSync) / 1000);
+    text.textContent = s < 2 ? 'Live' : `Live · synced ${s}s ago`;
+  }
+}
+
+// ---------------------------------------------------------------- routing
+// #/<tab>[/<id>] where id opens a job/artifact drawer or selects a session.
+function navigate(tab, id) {
+  const hash = `#/${tab}${id ? '/' + encodeURIComponent(id) : ''}`;
+  if (location.hash === hash) route(); else location.hash = hash;
+}
+
+function route() {
+  if (!state.token) return;
+  const [, rawTab, rawId] = location.hash.match(/^#\/([a-z]+)(?:\/([^/]+))?/) || [];
+  const tab = TABS.includes(rawTab) ? rawTab : 'workers';
+  const id = rawId ? decodeURIComponent(rawId) : null;
+  state.tab = tab;
+  for (const t of TABS) $(`#view-${t}`).hidden = t !== tab;
+  document.querySelectorAll('.tabs a').forEach((a) => {
+    if (a.dataset.tab === tab) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
+  });
+  if (tab === 'sessions') {
+    if (id && id !== state.session) selectSession(id);
+    else if (state.session) pollSession();
+  } else {
+    clearTimeout(state.termTimer);
+  }
+  if ((tab === 'jobs' || tab === 'artifacts') && id) {
+    if (drawer.kind !== tab || drawer.id !== id) openDrawer(tab, id);
+  } else if (drawer.kind) {
+    closeDrawer(false);
+  }
+  render();
+}
+window.addEventListener('hashchange', route);
+
+// ---------------------------------------------------------------- render
+function render() {
+  if (!state.loaded) return;
+  fillTargets();
+  const names = uniqueNames();
+  const running = state.jobs.filter((j) => j.status === 'running' || j.status === 'pending').length;
+  const openSessions = state.sessions.filter((s) => s.status === 'open' || s.status === 'starting').length;
+  $('#badge-workers').textContent = names.length ? `${names.filter((w) => w.online).length}/${names.length}` : '';
+  $('#badge-jobs').textContent = running || '';
+  $('#badge-sessions').textContent = openSessions || '';
+  keepFocus(() => {
+    if (state.tab === 'workers') renderWorkers();
+    if (state.tab === 'jobs') renderJobs();
+    if (state.tab === 'sessions') renderSessions();
+    if (state.tab === 'artifacts') renderArtifacts();
+  });
+}
+
+// Lists are rebuilt on every refresh; carry keyboard focus over to the
+// rebuilt element with the same data-fk key.
+function keepFocus(fn) {
+  const fk = document.activeElement?.dataset?.fk;
+  fn();
+  if (fk && document.activeElement?.dataset?.fk !== fk) {
+    [...document.querySelectorAll('[data-fk]')].find((el) => el.dataset.fk === fk)?.focus();
+  }
+}
+
+// One worker may have several registrations (a restart re-registers it);
+// targets are offered by name, preferring the online registration.
+function uniqueNames() {
+  const by = new Map();
+  for (const w of state.workers) {
+    const prev = by.get(w.name);
+    if (!prev || (w.online && !prev.online) || (w.online === prev.online && w.last_seen > prev.last_seen)) by.set(w.name, w);
+  }
+  return [...by.values()].sort((a, b) => (b.online - a.online) || a.name.localeCompare(b.name));
+}
+
+function fillTargets() {
+  const names = uniqueNames();
+  document.querySelectorAll('select[data-targets]').forEach((sel) => {
+    const any = sel.dataset.targets === 'any';
+    const opts = [];
+    if (any) opts.push(['', 'Any available worker', false]);
+    for (const w of names) {
+      if (!any && !w.online) continue;
+      opts.push([w.name, w.online ? w.name : `${w.name} (offline, job will wait)`, false]);
+    }
+    if (!opts.length) opts.push(['', 'No workers online', true]);
+    const sig = JSON.stringify(opts);
+    if (sel.dataset.sig === sig) return;
+    const keep = sel.dataset.want ?? sel.value;
+    sel.replaceChildren(...opts.map(([v, t, dis]) => h('option', { value: v, disabled: dis }, t)));
+    sel.dataset.sig = sig;
+    if (opts.some(([v]) => v === keep)) { sel.value = keep; delete sel.dataset.want; }
+  });
+}
+document.querySelectorAll('select[data-targets]').forEach((sel) =>
+  sel.addEventListener('change', () => { delete sel.dataset.want; }));
+
+function presetTarget(selId, name) {
+  const sel = $(selId);
+  sel.dataset.want = name;
+  delete sel.dataset.sig;
+  fillTargets();
+}
+
+// ----- workers
+function renderWorkers() {
+  const names = uniqueNames();
+  const online = names.filter((w) => w.online);
+  $('#stat-online').replaceChildren(String(online.length), h('small', {}, ` / ${names.length}`));
+  $('#stat-busy').textContent = online.filter((w) => w.current_job).length;
+  $('#stat-pending').textContent = state.jobs.filter((j) => j.status === 'pending').length;
+  $('#stat-sessions').textContent = state.sessions.filter((s) => s.status === 'open').length;
+
+  const grid = $('#worker-grid');
+  if (!names.length) {
+    grid.replaceChildren(h('div', { class: 'card empty', style: 'grid-column: 1 / -1' },
+      h('strong', {}, 'No workers enrolled yet'), 'Use the enroll command below on a machine you manage.'));
+  } else {
+    grid.replaceChildren(...names.map(workerCard));
+  }
+  const server = location.origin + BASE.replace(/\/$/, '');
+  $('#enroll-cmd').textContent =
+    `curl -fsSL ${server}/install.sh \\\n  | RELAY_SERVER=${server} RELAY_WORKER_TOKEN=YOUR_WORKER_TOKEN sh`;
+}
+
+function workerCard(w) {
+  const caps = w.caps || {};
+  const st = !w.online ? 'offline' : w.current_job ? 'busy' : 'idle';
+  const gpus = Array.isArray(caps.gpus) ? caps.gpus : [];
+  const kv = (k, v) => [h('dt', {}, k), h('dd', {}, v == null || v === '' ? '—' : v)];
+  return h('article', { class: `card worker ${w.online ? '' : 'offline'}` },
+    h('div', { class: 'worker-head' },
+      h('span', { class: `dot ${w.online ? (w.current_job ? 'live' : 'ok') : ''}` }),
+      h('div', { class: 'who' }, h('h3', { title: w.name }, w.name), h('code', { class: 'muted small' }, w.id)),
+      pill(st)),
+    h('dl', { class: 'kv' },
+      kv('System', [caps.platform, caps.release].filter(Boolean).join(' ')),
+      kv('Arch', caps.machine), kv('CPUs', caps.cpu_count), kv('Python', caps.python),
+      kv('Last seen', ago(w.last_seen))),
+    gpus.length ? h('div', { class: 'chips' }, gpus.map((g) => h('span', { class: 'chip gpu' }, g))) : null,
+    w.current_job ? h('div', { class: 'busy-line' }, 'Running ',
+      h('button', { class: 'link mono', type: 'button', onclick: () => navigate('jobs', w.current_job) }, w.current_job)) : null,
+    h('footer', {},
+      h('button', { class: 'sm', type: 'button', 'data-fk': `run:${w.name}`, onclick: () => { presetTarget('#job-target', w.name); navigate('jobs'); $('#job-command').focus(); } }, 'Run job'),
+      h('button', { class: 'sm', type: 'button', 'data-fk': `sess:${w.name}`, disabled: !w.online, onclick: () => { presetTarget('#session-target', w.name); navigate('sessions'); $('#session-command').focus(); } }, 'Open session'),
+      h('button', { class: 'sm', type: 'button', 'data-fk': `files:${w.name}`, disabled: !w.online, onclick: () => { presetTarget('#pull-target', w.name); presetTarget('#shot-target', w.name); navigate('artifacts'); $('#pull-path').focus(); } }, 'Files')));
+}
+
+// ----- jobs
+const JOB_FILTERS = [
+  ['all', 'All', () => true],
+  ['active', 'Active', (j) => j.status === 'running' || j.status === 'pending'],
+  ['done', 'Succeeded', (j) => j.status === 'done'],
+  ['error', 'Failed', (j) => j.status === 'error'],
+];
+
+function renderJobs() {
+  const q = state.jobQuery.toLowerCase();
+  $('#job-filter').replaceChildren(...JOB_FILTERS.map(([key, label, fn]) =>
+    h('button', { type: 'button', 'aria-pressed': String(state.jobFilter === key),
+                  'data-fk': `filter:${key}`, onclick: () => { state.jobFilter = key; keepFocus(renderJobs); } },
+      label, ' ', h('span', { class: 'count' }, state.jobs.filter(fn).length))));
+  const fn = JOB_FILTERS.find(([k]) => k === state.jobFilter)[2];
+  const jobs = state.jobs.filter(fn).filter((j) => !q ||
+    [j.id, j.label, cmdText(j.command), j.target].some((x) => x && String(x).toLowerCase().includes(q)));
+
+  $('#job-rows').replaceChildren(...jobs.map((j) => {
+    const open = () => navigate('jobs', j.id);
+    return h('tr', { class: 'clickable', tabindex: '0', 'data-fk': `job:${j.id}`, onclick: open,
+                     onkeydown: (e) => { if (e.key === 'Enter') open(); } },
+      h('td', {}, pill(j.status)),
+      h('td', {},
+        h('span', { class: 'cmd', title: cmdText(j.command) }, j.label || cmdText(j.command) || j.id),
+        h('span', { class: 'sub' }, h('code', {}, j.id), j.label && j.command ? ` · ${cmdText(j.command)}` : '',
+          j.artifacts && j.artifacts.length ? ` · ${j.artifacts.length} artifact${j.artifacts.length > 1 ? 's' : ''}` : '')),
+      h('td', { class: 'nowrap' }, j.worker_id ? workerName(j.worker_id) : h('span', { class: 'muted' }, j.target ? `→ ${j.target}` : 'any')),
+      h('td', { class: 'num' }, j.exit_code == null ? '—' : String(j.exit_code)),
+      h('td', { class: 'num' }, j.started_at ? duration(j.started_at, j.finished_at) : '—'),
+      h('td', { class: 'num', title: clock(j.created_at) }, ago(j.created_at)));
+  }));
+  const empty = $('#job-empty');
+  empty.hidden = jobs.length > 0;
+  empty.replaceChildren(state.jobs.length
+    ? h('strong', {}, 'No jobs match this filter')
+    : h('strong', {}, 'No jobs yet'), state.jobs.length ? '' : 'Submit a command on the left to run it on the pool.');
+}
+
+$('#job-search').addEventListener('input', (e) => { state.jobQuery = e.target.value; keepFocus(renderJobs); });
+$('#job-form').elements.binary.addEventListener('change', (e) => { $('#job-binary-opts').hidden = !e.target.checked; });
+$('#job-command').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); $('#job-form').requestSubmit(); }
+});
+
+const lines = (s) => String(s || '').split('\n').map((l) => l.trim()).filter(Boolean);
+
+$('#job-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const f = e.target.elements;
+  const body = { command: f.command.value.trim(), shell: !f.no_shell.checked };
+  if (!body.command) return toast('Enter a command to run.', 'error');
+  if (f.target.value) body.target = f.target.value;
+  if (f.label.value.trim()) body.label = f.label.value.trim();
+  if (f.cwd.value.trim()) body.cwd = f.cwd.value.trim();
+  if (f.timeout.value) {
+    const t = Number(f.timeout.value);
+    if (!(t > 0)) return toast('Timeout must be a positive number of seconds.', 'error');
+    body.timeout = t;
+  }
+  const env = {};
+  for (const l of lines(f.env.value)) {
+    const i = l.indexOf('=');
+    if (i < 1) return toast(`Environment line "${l}" is not KEY=value.`, 'error');
+    env[l.slice(0, i)] = l.slice(i + 1);
+  }
+  if (Object.keys(env).length) body.env = env;
+  const uploads = lines(f.uploads.value);
+  if (uploads.length) body.upload_paths = uploads;
+  if (f.binary.checked) {
+    body.binary_stdout = true;
+    if (f.bin_name.value.trim()) body.binary_out_name = f.bin_name.value.trim();
+    if (f.bin_type.value.trim()) body.binary_out_type = f.bin_type.value.trim();
+  }
+  await submitJob(body, e.target.querySelector('button[type=submit]'));
+});
+
+async function submitJob(body, btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const { job_id } = await api('POST', 'api/jobs', body);
+    toast(`Job ${job_id} queued`);
+    refreshSoon();
+    navigate('jobs', job_id);
+  } catch (err) { fail(err); }
+  finally { if (btn) btn.disabled = false; }
+}
+
+function loadJobIntoForm(job) {
+  const form = $('#job-form'), f = form.elements;
+  f.command.value = cmdText(job.command);
+  f.label.value = job.label || '';
+  f.cwd.value = job.cwd || '';
+  f.timeout.value = job.timeout || '';
+  f.env.value = Object.entries(job.env || {}).map(([k, v]) => `${k}=${v}`).join('\n');
+  f.uploads.value = (job.upload_paths || []).join('\n');
+  f.no_shell.checked = job.shell === false;
+  f.binary.checked = !!job.binary_stdout;
+  f.bin_name.value = job.binary_out_name || '';
+  f.bin_type.value = job.binary_out_type || '';
+  $('#job-binary-opts').hidden = !job.binary_stdout;
+  if (job.cwd || job.timeout || job.upload_paths?.length || job.binary_stdout || job.shell === false || Object.keys(job.env || {}).length) {
+    form.querySelector('details').open = true;
+  }
+  presetTarget('#job-target', job.target || '');
+  closeDrawer();
+  f.command.focus();
+}
+
+// ----- sessions
+function renderSessions() {
+  const list = $('#session-list');
+  if (!state.sessions.length) {
+    list.replaceChildren(h('li', { class: 'empty small' }, 'No sessions yet.'));
+  } else {
+    list.replaceChildren(...state.sessions.map((s) => h('li', {},
+      h('button', { type: 'button', 'data-fk': `s:${s.id}`, 'aria-current': String(s.id === state.session), onclick: () => navigate('sessions', s.id) },
+        h('div', { class: 'top' }, h('span', { class: 'cmd' }, s.command || '(shell)'), pill(s.status)),
+        h('div', { class: 'muted small' }, `${workerName(s.worker_id)} · ${ago(s.created_at)}`)))));
+  }
+  renderTerm();
+}
+
+function selectSession(id) {
+  state.session = id;
+  state.history = []; state.histPos = 0;
+  state.term[id] = state.term[id] || { raw: '', since: 0, info: null };
+  renderSessions();
+  pollSession();
+  setTimeout(() => $('#term-line').focus(), 0);
+}
+
+// Only one poll is ever in flight: overlapping polls would read the same
+// `since` offset and append the same output twice.
+async function pollSession() {
+  clearTimeout(state.termTimer);
+  state.termTimer = null;
+  const id = state.session;
+  if (!id || state.tab !== 'sessions' || !state.token) return;
+  if (state.termBusy) { state.termAgain = true; return; }
+  const t = state.term[id];
+  const since = t.since;
+  let s;
+  state.termBusy = true;
+  try {
+    s = await api('GET', `api/sessions/${encodeURIComponent(id)}?since=${since}`);
+  } catch (err) {
+    state.termBusy = false;
+    if (err instanceof AuthError) return signOut(err.message);
+    if (id === state.session) {
+      t.info = t.info || { id, status: 'error' };
+      t.error = err.message;
+      renderTerm();
+    }
+    return;
+  }
+  state.termBusy = false;
+  if (state.termAgain) { state.termAgain = false; state.termTimer = setTimeout(pollSession, 50); }
+  if (id !== state.session || t.since !== since) return;
+  if (s.output) {
+    t.raw += s.output;
+    if (t.raw.length > 400000) t.raw = t.raw.slice(-300000);
+  }
+  t.since = s.output_len;
+  t.info = s;
+  t.error = null;
+  renderTerm();
+  if ((s.status === 'open' || s.status === 'starting') && !state.termTimer) {
+    state.termTimer = setTimeout(pollSession, document.hidden ? 2000 : 400);
+  }
+}
+
+function renderTerm() {
+  const id = state.session;
+  const t = id && state.term[id];
+  $('#term-empty').hidden = !!t;
+  $('#term-live').hidden = !t;
+  if (!t) return;
+  const info = t.info || state.sessions.find((s) => s.id === id) || { status: 'starting' };
+  const live = info.status === 'open' || info.status === 'starting';
+  $('#term-title').textContent = info.command || '(shell)';
+  $('#term-sub').textContent = `${id}${info.worker_id ? ' on ' + workerName(info.worker_id) : ''}` +
+    (info.exit_code != null ? ` · exit ${info.exit_code}` : '') + (t.error ? ` · ${t.error}` : '');
+  $('#term-status').replaceChildren(pill(info.status));
+  $('#term-close').disabled = !live;
+  $('#term-line').disabled = !live;
+  document.querySelectorAll('#term-form button').forEach((b) => { b.disabled = !live; });
+  const out = $('#term-out');
+  const stick = nearBottom(out);
+  const text = cleanTerm(t.raw);
+  if (out.textContent !== text) out.textContent = text || (info.status === 'starting' ? 'Waiting for the worker to start the session…' : '');
+  if (stick) out.scrollTop = out.scrollHeight;
+}
+
+async function sendToSession(data) {
+  const id = state.session;
+  if (!id) return;
+  try {
+    await api('POST', `api/sessions/${encodeURIComponent(id)}/input`, { data });
+    clearTimeout(state.termTimer);
+    state.termTimer = setTimeout(pollSession, 120);
+  } catch (err) { fail(err); }
+}
+
+$('#session-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const form = e.target, f = form.elements;
+  if (!f.target.value) return toast('No online worker selected.', 'error');
+  const body = { target: f.target.value, shell: true };
+  if (f.command.value.trim()) body.command = f.command.value.trim();
+  if (f.cwd.value.trim()) body.cwd = f.cwd.value.trim();
+  const btn = form.querySelector('button[type=submit]');
+  btn.disabled = true;
+  try {
+    const { session_id } = await api('POST', 'api/sessions', body);
+    refreshSoon();
+    navigate('sessions', session_id);
+  } catch (err) { fail(err); }
+  finally { btn.disabled = false; }
+});
+
+$('#term-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const input = $('#term-line');
+  const line = input.value;
+  if (line.trim() && state.history[state.history.length - 1] !== line) state.history.push(line);
+  state.histPos = state.history.length;
+  input.value = '';
+  sendToSession(line + '\n');
+});
+$('#term-line').addEventListener('keydown', (e) => {
+  const input = e.target;
+  if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+    if (!state.history.length) return;
+    e.preventDefault();
+    state.histPos = Math.max(0, Math.min(state.history.length, state.histPos + (e.key === 'ArrowUp' ? -1 : 1)));
+    input.value = state.history[state.histPos] ?? '';
+  } else if (e.ctrlKey && (e.key === 'c' || e.key === 'd') && !input.value && !window.getSelection().toString()) {
+    e.preventDefault();
+    sendToSession(e.key === 'c' ? '\x03' : '\x04');
+  }
+});
+const KEYS = { 'C-c': '\x03', 'C-d': '\x04', tab: '\t' };
+document.querySelectorAll('#term-form button[data-key]').forEach((b) =>
+  b.addEventListener('click', () => { sendToSession(KEYS[b.dataset.key]); $('#term-line').focus(); }));
+$('#term-out').addEventListener('click', () => { if (!window.getSelection().toString()) $('#term-line').focus(); });
+$('#term-close').addEventListener('click', async () => {
+  const id = state.session;
+  if (!id) return;
+  try {
+    await api('POST', `api/sessions/${encodeURIComponent(id)}/close`, {});
+    toast(`Closing session ${id}`);
+    clearTimeout(state.termTimer);
+    state.termTimer = setTimeout(pollSession, 300);
+    refreshSoon();
+  } catch (err) { fail(err); }
+});
+
+// ----- artifacts
+function artifactSource(a) {
+  if (a.job_id) return h('button', { class: 'link mono', type: 'button', onclick: (e) => { e.stopPropagation(); navigate('jobs', a.job_id); } }, `job ${a.job_id}`);
+  if (a.session_id) return `session ${a.session_id}`;
+  if (a.worker) return `pulled from ${workerName(a.worker)}`;
+  return '—';
+}
+
+function renderArtifacts() {
+  const rows = state.artifacts.map((a) => {
+    const open = () => navigate('artifacts', a.id);
+    return h('tr', { class: 'clickable', tabindex: '0', 'data-fk': `art:${a.id}`, onclick: open, onkeydown: (e) => { if (e.key === 'Enter') open(); } },
+      h('td', {}, h('span', { class: 'cmd' }, a.name), h('span', { class: 'sub' }, h('code', {}, a.id))),
+      h('td', {}, pill(a.status), a.error ? h('span', { class: 'sub' }, a.error) : null),
+      h('td', { class: 'nowrap' }, artifactSource(a)),
+      h('td', { class: 'mono small' }, a.content_type),
+      h('td', { class: 'num' }, bytes(a.size)),
+      h('td', { class: 'num', title: clock(a.created_at) }, ago(a.created_at)));
+  });
+  $('#artifact-rows').replaceChildren(...rows);
+  $('#artifact-empty').hidden = rows.length > 0;
+}
+
+$('#pull-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const form = e.target, f = form.elements;
+  if (!f.target.value) return toast('No online worker selected.', 'error');
+  const body = { target: f.target.value, path: f.path.value.trim() };
+  if (f.name.value.trim()) body.name = f.name.value.trim();
+  const btn = form.querySelector('button[type=submit]');
+  btn.disabled = true;
+  try {
+    const { artifact_id } = await api('POST', 'api/pull', body);
+    refreshSoon();
+    navigate('artifacts', artifact_id);
+  } catch (err) { fail(err); }
+  finally { btn.disabled = false; }
+});
+
+$('#shot-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const form = e.target, f = form.elements;
+  if (!f.target.value) return toast('No online worker selected.', 'error');
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  await submitJob({
+    command: f.command.value.trim(), shell: true, target: f.target.value, label: 'screenshot',
+    binary_stdout: true, binary_out_name: `screenshot-${stamp}.png`, binary_out_type: 'image/png',
+  }, form.querySelector('button[type=submit]'));
+});
+
+// ---------------------------------------------------------------- drawer
+// blobs: artifact id -> Promise<{url, text}>; ready: id -> resolved value.
+const drawer = { kind: null, id: null, timer: null, blobs: new Map(), ready: new Map(), gen: 0 };
+
+function openDrawer(kind, id) {
+  closeDrawer(false);
+  drawer.kind = kind; drawer.id = id; drawer.gen++;
+  $('#drawer-title').textContent = kind === 'jobs' ? `Job ${id}` : `Artifact ${id}`;
+  $('#drawer-status').replaceChildren();
+  $('#drawer-body').replaceChildren(h('p', { class: 'muted' }, 'Loading…'));
+  $('#drawer').hidden = false;
+  $('#drawer-close').focus();
+  if (kind === 'jobs') pollJobDrawer(drawer.gen); else pollArtifactDrawer(drawer.gen);
+}
+
+function closeDrawer(updateHash = true) {
+  clearTimeout(drawer.timer);
+  for (const p of drawer.blobs.values()) p.then((b) => URL.revokeObjectURL(b.url), () => {});
+  drawer.blobs.clear();
+  drawer.ready.clear();
+  const was = drawer.kind;
+  drawer.kind = null; drawer.id = null; drawer.gen++;
+  $('#drawer').hidden = true;
+  if (updateHash && was) navigate(state.tab);
+}
+$('#drawer-close').addEventListener('click', () => closeDrawer());
+$('#drawer-scrim').addEventListener('click', () => closeDrawer());
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && drawer.kind) closeDrawer(); });
+
+// Re-render the drawer body while keeping the reader's scroll positions.
+function setDrawerBody(...nodes) {
+  const body = $('#drawer-body');
+  const oldOut = body.querySelector('.output');
+  const outStick = !oldOut || nearBottom(oldOut);
+  const outTop = oldOut ? oldOut.scrollTop : 0;
+  const top = body.scrollTop;
+  body.replaceChildren(...nodes);
+  const out = body.querySelector('.output');
+  if (out) out.scrollTop = outStick ? out.scrollHeight : outTop;
+  body.scrollTop = top;
+}
+
+async function pollJobDrawer(gen) {
+  const id = drawer.id;
+  let job, metas;
+  try {
+    job = await api('GET', `api/jobs/${encodeURIComponent(id)}`);
+    metas = await Promise.all((job.artifacts || []).map((aid) =>
+      api('GET', `api/artifacts/${encodeURIComponent(aid)}?meta=1`).catch(() => ({ id: aid, status: 'error', error: 'unavailable' }))));
+  } catch (err) {
+    if (gen !== drawer.gen) return;
+    if (err instanceof AuthError) return signOut(err.message);
+    return setDrawerBody(h('p', { class: 'error-text' }, err.message));
+  }
+  if (gen !== drawer.gen) return;
+  $('#drawer-title').textContent = job.label ? `${job.label} · ${job.id}` : `Job ${job.id}`;
+  $('#drawer-status').replaceChildren(pill(job.status));
+  const out = cleanTerm(job.output || '');
+  const meta = (k, v) => [h('dt', {}, k), h('dd', {}, v == null || v === '' ? '—' : v)];
+  setDrawerBody(
+    h('section', {}, h('dl', { class: 'meta' },
+      meta('Worker', job.worker_id ? `${workerName(job.worker_id)} (${job.worker_id})` : 'not claimed yet'),
+      meta('Target', job.target || 'any'),
+      meta('Exit code', job.exit_code == null ? null : String(job.exit_code)),
+      meta('Duration', job.started_at ? duration(job.started_at, job.finished_at) : null),
+      meta('Submitted', clock(job.created_at)),
+      meta('Finished', job.finished_at ? clock(job.finished_at) : null),
+      meta('Working dir', job.cwd),
+      meta('Timeout', job.timeout ? `${job.timeout} s` : null),
+      meta('Shell', job.shell === false ? 'no (argv)' : 'yes'))),
+    h('section', {}, h('h3', {}, 'Command'), h('pre', { class: 'codeblock' }, cmdText(job.command))),
+    Object.keys(job.env || {}).length ? h('section', {}, h('h3', {}, 'Environment'),
+      h('pre', { class: 'codeblock' }, Object.entries(job.env).map(([k, v]) => `${k}=${v}`).join('\n'))) : null,
+    h('section', {}, h('h3', {}, job.binary_stdout ? 'Output (stderr; stdout captured as artifact)' : 'Output'),
+      h('pre', { class: `output ${out ? '' : 'empty-out'}` },
+        out || (job.status === 'pending' ? 'Waiting for a worker to claim this job…'
+               : job.status === 'running' ? 'Running, no output yet…' : 'No output.'))),
+    metas.length ? h('section', {}, h('h3', {}, 'Artifacts'),
+      h('div', { class: 'art-list' }, metas.map((a) => artifactCard(a, gen)))) : null,
+    h('section', { class: 'drawer-actions' },
+      h('button', { type: 'button', onclick: () => loadJobIntoForm(job) }, 'Edit & run again'),
+      h('button', { type: 'button', onclick: () => copyText(cmdText(job.command)) }, 'Copy command'),
+      out ? h('button', { type: 'button', onclick: () => copyText(out) }, 'Copy output') : null));
+
+  const live = job.status === 'pending' || job.status === 'running' ||
+    metas.some((a) => a.status === 'pending' || a.status === 'uploading');
+  if (live) drawer.timer = setTimeout(() => pollJobDrawer(gen), document.hidden ? 3000 : 1000);
+}
+
+async function pollArtifactDrawer(gen) {
+  const id = drawer.id;
+  let a;
+  try {
+    a = await api('GET', `api/artifacts/${encodeURIComponent(id)}?meta=1`);
+  } catch (err) {
+    if (gen !== drawer.gen) return;
+    if (err instanceof AuthError) return signOut(err.message);
+    return setDrawerBody(h('p', { class: 'error-text' }, err.message));
+  }
+  if (gen !== drawer.gen) return;
+  $('#drawer-title').textContent = a.name;
+  $('#drawer-status').replaceChildren(pill(a.status));
+  setDrawerBody(
+    h('section', {}, h('dl', { class: 'meta' },
+      [['Id', a.id], ['Type', a.content_type], ['Size', bytes(a.size)], ['Created', clock(a.created_at)]]
+        .map(([k, v]) => [h('dt', {}, k), h('dd', {}, v)]),
+      h('dt', {}, 'Source'), h('dd', {}, artifactSource(a)),
+      a.error ? [h('dt', {}, 'Error'), h('dd', { class: 'error-text' }, a.error)] : null)),
+    h('section', {}, artifactCard(a, gen, true)));
+  if (a.status === 'pending' || a.status === 'uploading') {
+    drawer.timer = setTimeout(() => pollArtifactDrawer(gen), document.hidden ? 3000 : 800);
+  }
+}
+
+const previewKind = (a) => {
+  const t = (a.content_type || '').toLowerCase(), n = (a.name || '').toLowerCase();
+  if (t.startsWith('image/') || /\.(png|jpe?g|gif|webp)$/.test(n)) return 'image';
+  if (t.startsWith('video/') || /\.(mp4|webm)$/.test(n)) return 'video';
+  if (t.startsWith('text/') || t.includes('json') || /\.(txt|log|json|csv|md|xml|ya?ml)$/.test(n)) return 'text';
+  return null;
+};
+
+// Fetch an artifact once per drawer (the API needs the bearer header, so
+// <img src> cannot point at it directly) and hand out a blob: URL.
+function artifactBlob(a) {
+  if (!drawer.blobs.has(a.id)) {
+    const p = (async () => {
+      const res = await api('GET', `api/artifacts/${encodeURIComponent(a.id)}`, undefined, true);
+      const blob = await res.blob();
+      const text = previewKind(a) === 'text' && blob.size <= 512 * 1024 ? await blob.text() : null;
+      return { url: URL.createObjectURL(blob), text };
+    })();
+    drawer.blobs.set(a.id, p);
+    p.then((b) => { if (drawer.blobs.get(a.id) === p) drawer.ready.set(a.id, b); },
+           () => { if (drawer.blobs.get(a.id) === p) drawer.blobs.delete(a.id); });
+  }
+  return drawer.blobs.get(a.id);
+}
+
+// A card for one artifact with a download button and, when complete, an
+// inline preview for images, video and small text files.
+function artifactCard(a, gen, expanded = false) {
+  const kind = previewKind(a);
+  const preview = h('div', { class: 'preview' });
+  const download = async (e) => {
+    const btn = e.currentTarget; btn.disabled = true;
+    try {
+      const { url } = await artifactBlob(a);
+      if (gen !== drawer.gen) return;
+      const link = h('a', { href: url, download: a.name });
+      document.body.append(link); link.click(); link.remove();
+    } catch (err) { fail(err); }
+    finally { btn.disabled = false; }
+  };
+  if (a.status === 'complete' && kind && (expanded || kind === 'image') && (kind !== 'text' || a.size <= 512 * 1024)) {
+    const fill = ({ url, text }) => {
+      if (kind === 'image') preview.replaceChildren(h('img', { src: url, alt: a.name }));
+      else if (kind === 'video') preview.replaceChildren(h('video', { src: url, controls: true }));
+      else preview.replaceChildren(h('pre', { class: 'output' }, text ?? ''));
+    };
+    if (drawer.ready.has(a.id)) fill(drawer.ready.get(a.id));
+    else {
+      preview.append(h('span', { class: 'muted small' }, 'Loading preview…'));
+      artifactBlob(a).then((b) => { if (gen === drawer.gen) fill(b); },
+                           (err) => preview.replaceChildren(h('span', { class: 'error-text' }, err.message)));
+    }
+  }
+  return h('div', { class: 'card art' },
+    h('div', { class: 'art-top' },
+      h('span', { class: 'name' }, a.name || a.id),
+      expanded ? null : pill(a.status),
+      h('span', { class: 'muted small' }, `${a.content_type || ''} · ${bytes(a.size)}`),
+      h('button', { class: 'sm', type: 'button', disabled: a.status !== 'complete', onclick: download }, 'Download'),
+      expanded ? null : h('button', { class: 'sm ghost', type: 'button', onclick: () => navigate('artifacts', a.id) }, 'Details')),
+    a.error && !expanded ? h('div', { class: 'error-text' }, a.error) : null,
+    a.status !== 'complete' && expanded && !a.error ? h('p', { class: 'muted small' }, 'Waiting for the worker to finish uploading…') : null,
+    preview);
+}
+
+// ---------------------------------------------------------------- misc
+document.querySelectorAll('[data-copy]').forEach((b) =>
+  b.addEventListener('click', () => copyText($('#' + b.dataset.copy).textContent, b)));
+setInterval(() => { if (state.token) renderSync(); }, 1000);
+
+(async function boot() {
+  const saved = (() => { try { return storage()?.getItem(TOKEN_KEY); } catch { return null; } })();
+  if (!saved) return showLogin();
+  try {
+    await signIn(saved, true);
+  } catch (err) {
+    state.token = null;
+    showLogin(err instanceof AuthError ? 'Your saved token is no longer valid. Sign in again.' : `Could not reach the coordinator: ${err.message}`);
+  }
+})();
+</script>
+</body>
+</html>

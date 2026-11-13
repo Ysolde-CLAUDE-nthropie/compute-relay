@@ -8,8 +8,11 @@ remote machines: this is the internal sanity check.
 Run: python3 test_local.py
 """
 
+import base64
+import hashlib
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -212,6 +215,22 @@ def main():
         wait_for(lambda: api("GET", f"/api/sessions/{sess}")[1]["status"] in ("closed", "error"),
                  10, "session to close")
         print("OK: session closed on request")
+
+        # --- web dashboard ---------------------------------------------
+        resp = urllib.request.urlopen(f"{BASE}/ui", timeout=5)
+        page = resp.read()
+        assert resp.headers["Content-Type"].startswith("text/html")
+        csp = resp.headers["Content-Security-Policy"]
+        script = re.search(rb"<script>(.*?)</script>", page, re.S).group(1)
+        digest = base64.b64encode(hashlib.sha256(script).digest()).decode()
+        assert f"script-src 'sha256-{digest}'" in csp, f"csp={csp!r}"
+        assert "connect-src 'self'" in csp and "frame-ancestors 'none'" in csp
+        print("OK: /ui served with a CSP pinning its inline script")
+
+        _, data = api("GET", "/api/jobs")
+        listed = {j["id"]: j for j in data["jobs"]}[job_id]
+        assert listed["command"] and "finished_at" in listed and "target" in listed
+        print("OK: job list includes command, target and timestamps")
 
     except Exception as e:
         failures.append(f"{type(e).__name__}: {e}")
