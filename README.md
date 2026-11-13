@@ -6,6 +6,15 @@ manage** (your own boxes, friends' HPC rigs they've agreed to lend). Workers pul
 jobs and run them — GPU scripts, batches of Android emulators, long simulations —
 and stream output back to you.
 
+It runs three kinds of work:
+
+- **one-shot jobs** — run a command, stream its text output, get the exit code.
+- **sessions** — a long-lived PTY-backed process on a chosen worker (e.g. an
+  `adb shell` or an interactive debugger) that you feed input to and read output
+  from. **Stateful across commands**, which is what APK joint-debugging needs.
+- **artifacts** — binary files pulled back from a worker: screenshots, screen
+  recordings, logs. Uploaded in chunks, so large recordings are fine.
+
 Think "a minimal self-hosted CI-runner pool," not magic. It is:
 
 - **Single-file, zero-dependency** — pure Python 3.8+ standard library on both ends.
@@ -110,8 +119,61 @@ Useful flags on `run`/`submit`:
 - `--cwd <path>` working directory on the worker
 - `--timeout <seconds>` kill the job (and its whole process tree) after N seconds
 - `--env K=V` (repeatable) extra environment variables
+- `--artifact <path>` (repeatable) a file on the worker to upload back after the job
 - `--no-shell` exec the argv directly instead of through a shell
-- `--label <text>` a human label for the job list
+- `--label <text>` a human label for the job
+
+## 4. Stateful sessions (interactive debugging)
+
+A **session** is a long-lived PTY-backed process on a specific worker. Input you
+send and output you read persist across calls, so it behaves like a real
+terminal on that machine — ideal for `adb shell` or a debugger during APK
+bring-up.
+
+```sh
+# open + attach in one step (type into it, Ctrl-D detaches, Ctrl-C closes)
+python3 client.py session shell --target pixel-host --cmd "adb shell"
+
+# or script it without a live terminal:
+SID=$(python3 client.py session open --target pixel-host --cmd "adb shell")
+python3 client.py session send $SID "getprop ro.product.model"
+python3 client.py session send $SID "input tap 540 1200"
+python3 client.py session list
+python3 client.py session close $SID
+```
+
+Note: because tools like `adb` are clients of a persistent daemon, even plain
+one-shot jobs targeting the same node (`run --target pixel-host "adb shell ..."`)
+hit the same running emulator. A session adds a single stateful shell you drive
+incrementally (shell variables, `cd`, a REPL, an interactive debugger).
+
+## 5. Screenshots, recordings, and file pulls
+
+Binary feedback comes back as **artifacts**:
+
+```sh
+# capture a screenshot (command's stdout is the PNG)
+python3 client.py screenshot --target pixel-host --out shot.png
+
+# record the device screen for 10s and pull the mp4 back
+python3 client.py record --target pixel-host --seconds 10 --out demo.mp4
+
+# pull any file off a worker
+python3 client.py pull --target pixel-host --out trace.bin /sdcard/trace.bin
+
+# capture arbitrary binary stdout from any command
+python3 client.py run --target node --binary-out out.bin "my-tool --emit-binary"
+
+python3 client.py artifacts                 # list what's been collected
+python3 client.py fetch <artifact_id> --out file.bin
+```
+
+`screenshot` defaults its capture command to `adb exec-out screencap -p`; pass
+`--cmd` to override for a different device/tool. `record` uses
+`adb shell screenrecord`. Both are thin conveniences over the generic
+binary-stdout and pull mechanisms, so non-adb workflows work too. Artifacts are
+uploaded in chunks and held in memory on the coordinator (cap set by
+`RELAY_MAX_ARTIFACT_BYTES`, default 512 MB). list
 
 ## HTTP API
 

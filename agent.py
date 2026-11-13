@@ -1,27 +1,35 @@
 #!/usr/bin/env python3
 """compute-relay worker agent.
 
-Runs on a machine you own or are authorized to manage. It connects OUT to a
-coordinator you specify, authenticates with the worker token, and then pulls
-and runs compute jobs, streaming their output back.
+Runs on a machine you own or are authorized to manage. Connects OUT to a
+coordinator you specify, authenticates with the worker token, then handles:
 
-It is deliberately transparent: it prints the coordinator it talks to and every
-command it runs. It does not hide itself, install persistence, or evade
-anything. Stop it with Ctrl-C (or stop the systemd unit). Only point it at a
-coordinator you trust, since by design it runs the commands that coordinator
-sends.
+  - one-shot jobs : run a command, stream text output, report the exit code
+  - sessions      : a long-lived PTY-backed process (e.g. `adb shell`) you feed
+                    input to and read output from, stateful across commands
+  - artifacts     : upload binary files back (screenshots, recordings), either
+                    a job's binary stdout, declared files after a job, or an
+                    ad-hoc file pull
+
+It is deliberately transparent: it prints the coordinator it talks to and the
+work it runs. It does not hide itself, install persistence, or evade anything.
+Stop it with Ctrl-C (or stop the systemd unit). Only point it at a coordinator
+you trust, since by design it runs the work that coordinator sends.
 
 Configuration (environment variables):
   RELAY_SERVER         coordinator base URL, e.g. https://relay.example.com
   RELAY_WORKER_TOKEN   shared worker token from the coordinator
   RELAY_WORKER_NAME    optional display name (default: hostname)
 
-Standard library only; works on Python 3.8+.
+Standard library only; POSIX (Linux/macOS). Python 3.8+.
 """
 
 import json
+import mimetypes
 import os
 import platform
+import pty
+import queue
 import signal
 import socket
 import subprocess
@@ -37,41 +45,80 @@ NAME = os.environ.get("RELAY_WORKER_NAME") or socket.gethostname()
 
 OUTPUT_FLUSH_SECONDS = 1.0
 OUTPUT_FLUSH_BYTES = 4096
+ARTIFACT_CHUNK_BYTES = 256 * 1024
+
+sessions = {}            # session_id -> {"master": fd, "proc": Popen, "lock": Lock}
+sessions_lock = threading.Lock()
+oneshot_q = queue.Queue()
 
 
 def log(msg):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
-def _request(method, path, body=None, expect_json=True, timeout=60):
+def _request(method, path, body=None, raw=None, ctype=None, expect_json=True, timeout=60):
     url = f"{SERVER}{path}"
-    data = json.dumps(body).encode() if body is not None else None
+    if raw is not None:
+        data = raw
+    elif body is not None:
+        data = json.dumps(body).encode()
+        ctype = ctype or "application/json"
+    else:
+        data = None
     req = urllib.request.Request(url, data=data, method=method)
     req.add_header("Authorization", f"Bearer {TOKEN}")
     if data is not None:
-        req.add_header("Content-Type", "application/json")
+        req.add_header("Content-Type", ctype or "application/octet-stream")
     resp = urllib.request.urlopen(req, timeout=timeout)
-    status = resp.getcode()
-    raw = resp.read()
-    if expect_json and raw:
-        return status, json.loads(raw)
-    return status, {}
+    payload = resp.read()
+    if expect_json and payload:
+        return resp.getcode(), json.loads(payload)
+    return resp.getcode(), {}
 
 
-def detect_caps():
-    caps = {
-        "platform": platform.system(),
-        "release": platform.release(),
-        "machine": platform.machine(),
-        "python": platform.python_version(),
-        "cpu_count": os.cpu_count(),
-    }
-    # Best-effort GPU note; never fails the agent if the tool is absent.
+# --- artifact helpers --------------------------------------------------
+def create_artifact(name, content_type, job_id=None, session_id=None):
+    _, data = _request("POST", "/api/artifacts",
+                       {"name": name, "content_type": content_type,
+                        "job_id": job_id, "session_id": session_id})
+    return data["artifact_id"]
+
+
+def put_chunk(artifact_id, data_bytes, final=False, error=False):
+    path = f"/api/artifacts/{artifact_id}/chunk?final={int(final)}&error={int(error)}"
+    _request("POST", path, raw=data_bytes, ctype="application/octet-stream",
+             expect_json=False, timeout=120)
+
+
+def upload_file(path, artifact_id=None, name=None, content_type=None,
+                job_id=None, session_id=None):
+    name = name or os.path.basename(path)
+    ctype = content_type or mimetypes.guess_type(name)[0] or "application/octet-stream"
+    if artifact_id is None:
+        artifact_id = create_artifact(name, ctype, job_id, session_id)
     try:
-        out = subprocess.run(
-            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
-            capture_output=True, text=True, timeout=5,
-        )
+        with open(path, "rb") as f:
+            while True:
+                chunk = f.read(ARTIFACT_CHUNK_BYTES)
+                if not chunk:
+                    break
+                put_chunk(artifact_id, chunk)
+        put_chunk(artifact_id, b"", final=True)
+        log(f"uploaded artifact {artifact_id} <- {path}")
+    except OSError as e:
+        put_chunk(artifact_id, b"", error=True)
+        log(f"artifact upload failed for {path}: {e}")
+    return artifact_id
+
+
+# --- enrollment --------------------------------------------------------
+def detect_caps():
+    caps = {"platform": platform.system(), "release": platform.release(),
+            "machine": platform.machine(), "python": platform.python_version(),
+            "cpu_count": os.cpu_count()}
+    try:
+        out = subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+                             capture_output=True, text=True, timeout=5)
         if out.returncode == 0 and out.stdout.strip():
             caps["gpus"] = [g.strip() for g in out.stdout.strip().splitlines()]
     except (OSError, subprocess.SubprocessError):
@@ -84,74 +131,74 @@ def register():
         try:
             _, data = _request("POST", "/api/register",
                                {"name": NAME, "caps": detect_caps()})
-            worker_id = data["worker_id"]
-            log(f"registered with coordinator as '{NAME}' (id={worker_id})")
-            return worker_id
+            log(f"registered with coordinator as '{NAME}' (id={data['worker_id']})")
+            return data["worker_id"]
         except (urllib.error.URLError, OSError, KeyError) as e:
             log(f"register failed ({e}); retrying in 5s")
             time.sleep(5)
 
 
+# --- one-shot jobs -----------------------------------------------------
 def post_result(job_id, output_chunk=None, done=False, exit_code=None, error=False):
     body = {"job_id": job_id}
     if output_chunk:
         body["output_chunk"] = output_chunk
     if done:
-        body["done"] = True
-        body["exit_code"] = exit_code
-        body["error"] = error
+        body.update({"done": True, "exit_code": exit_code, "error": error})
     try:
         _request("POST", "/api/result", body, expect_json=False, timeout=30)
     except (urllib.error.URLError, OSError) as e:
         log(f"failed to post result for job {job_id}: {e}")
 
 
+def _build_args(command, use_shell):
+    if use_shell:
+        return command if isinstance(command, str) else " ".join(command)
+    return command if isinstance(command, list) else command.split()
+
+
+def kill_tree(proc):
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+
 def run_job(job):
     job_id = job["id"]
+    if job.get("binary_stdout"):
+        return run_job_binary(job)
+
     command = job["command"]
     use_shell = job.get("shell", True)
     cwd = job.get("cwd") or None
     timeout = job.get("timeout")
-    extra_env = job.get("env") or {}
-
     env = os.environ.copy()
-    env.update({str(k): str(v) for k, v in extra_env.items()})
+    env.update({str(k): str(v) for k, v in (job.get("env") or {}).items()})
 
     log(f"running job {job_id}: {command!r} (shell={use_shell}, cwd={cwd or '.'})")
     try:
-        if use_shell:
-            args = command if isinstance(command, str) else " ".join(command)
-        else:
-            args = command if isinstance(command, list) else command.split()
         proc = subprocess.Popen(
-            args, shell=use_shell, cwd=cwd, env=env,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, bufsize=1,
-            # Own process group so a timeout can kill the whole job tree
-            # (the shell and any children), not just the top process.
-            start_new_session=True,
-        )
+            _build_args(command, use_shell), shell=use_shell, cwd=cwd, env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            bufsize=1, start_new_session=True)
     except (OSError, ValueError) as e:
         log(f"job {job_id} failed to start: {e}")
-        post_result(job_id, output_chunk=f"failed to start: {e}\n",
-                    done=True, exit_code=-1, error=True)
-        return
+        return post_result(job_id, output_chunk=f"failed to start: {e}\n",
+                           done=True, exit_code=-1, error=True)
 
-    # Stream output back in small batches.
-    buf = []
-    buf_len = [0]
-    last_flush = [time.time()]
-    lock = threading.Lock()
-    stop = threading.Event()
+    buf, buf_len, last_flush = [], [0], [time.time()]
+    lock, stop = threading.Lock(), threading.Event()
 
     def flush():
         with lock:
             if not buf:
                 return
             chunk = "".join(buf)
-            buf.clear()
-            buf_len[0] = 0
-            last_flush[0] = time.time()
+            buf.clear(); buf_len[0] = 0; last_flush[0] = time.time()
         post_result(job_id, output_chunk=chunk)
 
     def flusher():
@@ -159,95 +206,248 @@ def run_job(job):
             if time.time() - last_flush[0] >= OUTPUT_FLUSH_SECONDS:
                 flush()
 
-    t = threading.Thread(target=flusher, daemon=True)
-    t.start()
+    threading.Thread(target=flusher, daemon=True).start()
 
-    killed = False
-
-    def kill_tree():
-        """Kill the job's whole process group, falling back to the process."""
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except (ProcessLookupError, PermissionError, OSError):
+    killed = [False]
+    if timeout:
+        def watchdog():
             try:
-                proc.kill()
-            except OSError:
-                pass
-
-    def watchdog():
-        nonlocal killed
-        try:
-            proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            killed = True
-            log(f"job {job_id} exceeded timeout {timeout}s; terminating")
-            kill_tree()
-
-    wd = threading.Thread(target=watchdog, daemon=True) if timeout else None
-    if wd:
-        wd.start()
+                proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                killed[0] = True
+                log(f"job {job_id} exceeded timeout {timeout}s; terminating")
+                kill_tree(proc)
+        threading.Thread(target=watchdog, daemon=True).start()
 
     try:
         for line in proc.stdout:
             with lock:
-                buf.append(line)
-                buf_len[0] += len(line)
-                flush_now = buf_len[0] >= OUTPUT_FLUSH_BYTES
-            if flush_now:
+                buf.append(line); buf_len[0] += len(line)
+                over = buf_len[0] >= OUTPUT_FLUSH_BYTES
+            if over:
                 flush()
     finally:
         proc.stdout.close()
         exit_code = proc.wait()
-        stop.set()
-        flush()
+        stop.set(); flush()
 
-    if killed:
+    if job.get("upload_paths"):
+        for p in job["upload_paths"]:
+            upload_file(p, job_id=job_id)
+
+    if killed[0]:
         post_result(job_id, output_chunk=f"\n[terminated after timeout {timeout}s]\n",
                     done=True, exit_code=exit_code, error=True)
-        log(f"job {job_id} terminated (timeout)")
     else:
-        post_result(job_id, done=True, exit_code=exit_code,
-                    error=(exit_code != 0))
-        log(f"job {job_id} finished with exit code {exit_code}")
+        post_result(job_id, done=True, exit_code=exit_code, error=(exit_code != 0))
+    log(f"job {job_id} finished with exit code {exit_code}")
 
 
+def run_job_binary(job):
+    """Capture the command's stdout as a binary artifact (e.g. a screenshot)."""
+    job_id = job["id"]
+    command = job["command"]
+    use_shell = job.get("shell", True)
+    cwd = job.get("cwd") or None
+    timeout = job.get("timeout")
+    name = job.get("binary_out_name") or "stdout.bin"
+    ctype = job.get("binary_out_type") or mimetypes.guess_type(name)[0] \
+        or "application/octet-stream"
+    env = os.environ.copy()
+    env.update({str(k): str(v) for k, v in (job.get("env") or {}).items()})
+
+    log(f"running binary job {job_id}: {command!r} -> artifact {name!r}")
+    artifact_id = create_artifact(name, ctype, job_id=job_id)
+    try:
+        proc = subprocess.Popen(
+            _build_args(command, use_shell), shell=use_shell, cwd=cwd, env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+    except (OSError, ValueError) as e:
+        put_chunk(artifact_id, b"", error=True)
+        return post_result(job_id, output_chunk=f"failed to start: {e}\n",
+                           done=True, exit_code=-1, error=True)
+
+    killed = [False]
+    if timeout:
+        def watchdog():
+            try:
+                proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                killed[0] = True
+                kill_tree(proc)
+        threading.Thread(target=watchdog, daemon=True).start()
+
+    while True:
+        chunk = proc.stdout.read(ARTIFACT_CHUNK_BYTES)
+        if not chunk:
+            break
+        put_chunk(artifact_id, chunk)
+    put_chunk(artifact_id, b"", final=True)
+    exit_code = proc.wait()
+    stderr = proc.stderr.read().decode(errors="replace")
+    post_result(job_id, output_chunk=stderr, done=True, exit_code=exit_code,
+                error=(exit_code != 0 or killed[0]))
+    log(f"binary job {job_id} finished with exit code {exit_code}")
+
+
+def oneshot_worker():
+    """Single consumer so one-shot jobs run sequentially, sessions aside."""
+    while True:
+        job = oneshot_q.get()
+        try:
+            run_job(job)
+        except Exception as e:  # never let one job kill the consumer
+            log(f"job {job.get('id')} crashed: {e}")
+            post_result(job.get("id"), output_chunk=f"worker error: {e}\n",
+                        done=True, exit_code=-1, error=True)
+
+
+# --- sessions (PTY-backed) --------------------------------------------
+def post_session(session_id, output_chunk=None, started=False, done=False,
+                 exit_code=None, error=False):
+    body = {"session_id": session_id}
+    if started:
+        body["started"] = True
+    if output_chunk:
+        body["output_chunk"] = output_chunk
+    if done:
+        body.update({"done": True, "exit_code": exit_code, "error": error})
+    try:
+        _request("POST", "/api/session_output", body, expect_json=False, timeout=30)
+    except (urllib.error.URLError, OSError) as e:
+        log(f"failed to post session output for {session_id}: {e}")
+
+
+def start_session(ctl):
+    session_id = ctl["session_id"]
+    command = ctl.get("command")
+    cwd = ctl.get("cwd") or None
+    env = os.environ.copy()
+    env.update({str(k): str(v) for k, v in (ctl.get("env") or {}).items()})
+    shell_bin = env.get("SHELL") or "/bin/bash"
+    if command:
+        argv = [shell_bin, "-c", command]
+    else:
+        argv = [shell_bin]
+
+    log(f"opening session {session_id}: {command or shell_bin!r}")
+    master_fd, slave_fd = pty.openpty()
+    try:
+        proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=slave_fd,
+                                stdout=slave_fd, stderr=slave_fd,
+                                start_new_session=True, close_fds=True)
+    except (OSError, ValueError) as e:
+        os.close(master_fd); os.close(slave_fd)
+        log(f"session {session_id} failed to start: {e}")
+        return post_session(session_id, output_chunk=f"failed to start: {e}\n",
+                            done=True, exit_code=-1, error=True)
+    os.close(slave_fd)
+    with sessions_lock:
+        sessions[session_id] = {"master": master_fd, "proc": proc,
+                                "lock": threading.Lock()}
+    post_session(session_id, started=True)
+
+    def reader():
+        try:
+            while True:
+                try:
+                    data = os.read(master_fd, 4096)
+                except OSError:
+                    data = b""
+                if not data:
+                    break
+                post_session(session_id, output_chunk=data.decode(errors="replace"))
+        finally:
+            exit_code = proc.wait()
+            with sessions_lock:
+                sessions.pop(session_id, None)
+            try:
+                os.close(master_fd)
+            except OSError:
+                pass
+            post_session(session_id, done=True, exit_code=exit_code,
+                         error=(exit_code != 0))
+            log(f"session {session_id} ended (exit {exit_code})")
+
+    threading.Thread(target=reader, daemon=True).start()
+
+
+def session_input(ctl):
+    session_id = ctl["session_id"]
+    with sessions_lock:
+        s = sessions.get(session_id)
+    if not s:
+        return
+    try:
+        with s["lock"]:
+            os.write(s["master"], ctl.get("data", "").encode())
+    except OSError as e:
+        log(f"session {session_id} input failed: {e}")
+
+
+def session_close(ctl):
+    session_id = ctl["session_id"]
+    with sessions_lock:
+        s = sessions.get(session_id)
+    if not s:
+        return
+    log(f"closing session {session_id}")
+    kill_tree(s["proc"])
+
+
+def do_pull(ctl):
+    upload_file(ctl["path"], artifact_id=ctl["artifact_id"])
+
+
+def handle_control(ctl):
+    kind = ctl.get("type")
+    if kind == "session_start":
+        start_session(ctl)
+    elif kind == "session_input":
+        session_input(ctl)
+    elif kind == "session_close":
+        session_close(ctl)
+    elif kind == "pull":
+        threading.Thread(target=do_pull, args=(ctl,), daemon=True).start()
+    else:
+        log(f"ignoring unknown control message: {kind}")
+
+
+# --- main control loop -------------------------------------------------
 def poll_loop(worker_id):
     backoff = 1
     while True:
         try:
-            status, data = _request(
-                "GET", f"/api/poll?worker_id={worker_id}",
-                expect_json=True, timeout=120,
-            )
+            status, data = _request("GET", f"/api/poll?worker_id={worker_id}",
+                                     expect_json=True, timeout=120)
             backoff = 1
-            if status == 200 and data.get("job"):
-                run_job(data["job"])
-            # 204 => no work; loop again immediately.
+            for ctl in data.get("controls", []):
+                handle_control(ctl)
+            if data.get("job"):
+                oneshot_q.put(data["job"])
         except urllib.error.HTTPError as e:
             if e.code == 409:
                 log("coordinator forgot us; re-registering")
-                return  # trigger re-register in outer loop
+                return
             log(f"poll HTTP error {e.code}; backing off {backoff}s")
-            time.sleep(backoff)
-            backoff = min(backoff * 2, 30)
+            time.sleep(backoff); backoff = min(backoff * 2, 30)
         except (urllib.error.URLError, OSError) as e:
             log(f"poll failed ({e}); backing off {backoff}s")
-            time.sleep(backoff)
-            backoff = min(backoff * 2, 30)
+            time.sleep(backoff); backoff = min(backoff * 2, 30)
 
 
 def main():
     if not SERVER or not TOKEN:
         print("error: set RELAY_SERVER and RELAY_WORKER_TOKEN", file=sys.stderr)
         sys.exit(2)
-
     print("=" * 64, flush=True)
     print("compute-relay worker agent", flush=True)
     print(f"  coordinator : {SERVER}", flush=True)
     print(f"  worker name : {NAME}", flush=True)
-    print("This agent runs compute jobs the coordinator sends. Stop with Ctrl-C.", flush=True)
+    print("Runs jobs and sessions the coordinator sends. Stop with Ctrl-C.", flush=True)
     print("=" * 64, flush=True)
 
+    threading.Thread(target=oneshot_worker, daemon=True).start()
     try:
         while True:
             worker_id = register()

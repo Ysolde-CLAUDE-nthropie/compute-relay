@@ -153,6 +153,66 @@ def main():
         assert job5["status"] == "error", f"status={job5['status']}"
         print("OK: job exceeding timeout was terminated")
 
+        # --- binary stdout artifact (stands in for `adb exec-out screencap`) ---
+        _, data = api("POST", "/api/jobs",
+                      {"command": "head -c 20000 /dev/urandom", "binary_stdout": True,
+                       "binary_out_name": "blob.bin", "target": "sim-worker"})
+        jid6 = data["job_id"]
+        wait_for(lambda: api("GET", f"/api/jobs/{jid6}")[1]["status"] in ("done", "error"),
+                 20, "binary job to finish")
+        _, job6 = api("GET", f"/api/jobs/{jid6}")
+        assert job6["status"] == "done", f"status={job6['status']}"
+        assert job6["artifacts"], "no artifact recorded on job"
+        art_id = job6["artifacts"][0]
+        wait_for(lambda: api("GET", f"/api/artifacts/{art_id}?meta=1")[1]["status"] == "complete",
+                 10, "artifact to complete")
+        _, meta = api("GET", f"/api/artifacts/{art_id}?meta=1")
+        assert meta["size"] == 20000, f"size={meta['size']}"
+        # Download raw bytes and verify length.
+        req = urllib.request.Request(f"{BASE}/api/artifacts/{art_id}")
+        req.add_header("Authorization", f"Bearer {ADMIN_TOKEN}")
+        raw = urllib.request.urlopen(req, timeout=10).read()
+        assert len(raw) == 20000, f"downloaded {len(raw)} bytes"
+        print("OK: binary stdout captured and downloaded as artifact (20000 bytes)")
+
+        # --- file pull from a worker ---
+        marker = f"pull-{int(time.time())}"
+        with open("/tmp/relay-pull-src.txt", "w") as f:
+            f.write(marker * 100)
+        _, data = api("POST", "/api/pull",
+                      {"target": "sim-worker", "path": "/tmp/relay-pull-src.txt"})
+        pull_art = data["artifact_id"]
+        wait_for(lambda: api("GET", f"/api/artifacts/{pull_art}?meta=1")[1]["status"] == "complete",
+                 10, "pulled artifact to complete")
+        req = urllib.request.Request(f"{BASE}/api/artifacts/{pull_art}")
+        req.add_header("Authorization", f"Bearer {ADMIN_TOKEN}")
+        pulled = urllib.request.urlopen(req, timeout=10).read().decode()
+        assert pulled == marker * 100, "pulled content mismatch"
+        print("OK: file pulled from worker as artifact")
+
+        # --- interactive session: stateful across commands ---
+        _, data = api("POST", "/api/sessions",
+                      {"target": "sim-worker", "command": "sh"})
+        sess = data["session_id"]
+        wait_for(lambda: api("GET", f"/api/sessions/{sess}")[1]["status"] == "open",
+                 10, "session to open")
+        # Set a variable in one command, read it in the next -> proves state persists.
+        api("POST", f"/api/sessions/{sess}/input", {"data": "MARKER=relay_stateful_123\n"})
+        time.sleep(0.5)
+        api("POST", f"/api/sessions/{sess}/input", {"data": "echo val=$MARKER\n"})
+
+        def saw_marker():
+            _, s = api("GET", f"/api/sessions/{sess}")
+            return "val=relay_stateful_123" in s["output"]
+
+        wait_for(saw_marker, 10, "session to echo the persisted variable")
+        print("OK: session preserved state across separate inputs")
+
+        api("POST", f"/api/sessions/{sess}/close", {})
+        wait_for(lambda: api("GET", f"/api/sessions/{sess}")[1]["status"] in ("closed", "error"),
+                 10, "session to close")
+        print("OK: session closed on request")
+
     except Exception as e:
         failures.append(f"{type(e).__name__}: {e}")
     finally:
