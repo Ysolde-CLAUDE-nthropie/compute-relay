@@ -100,6 +100,12 @@ It downloads `agent.py` into `~/.compute-relay` and runs it in the foreground,
 logging what it does. To run it as a managed service instead, see
 [`deploy/compute-relay-worker.service`](deploy/compute-relay-worker.service).
 
+The dashboard's **Enroll a worker** card builds this command for you, with the
+worker token already filled in, and offers a Linux/macOS/Windows switch plus a
+ready-made service snippet (systemd user unit, launchd agent, or a logon
+scheduled task). It reads the token from `GET /api/enroll`, which is admin-only
+and never returns the admin token.
+
 Worker environment variables: `RELAY_SERVER`, `RELAY_WORKER_TOKEN`,
 `RELAY_WORKER_NAME` (default: hostname), `RELAY_DIR` (default: `~/.compute-relay`).
 
@@ -245,6 +251,7 @@ with an `X-Relay-UI: 1` header.
 | `GET /api/jobs` | admin | list jobs |
 | `GET /api/jobs/<id>` | admin | job status + accumulated output |
 | `GET /api/workers` | admin | list workers |
+| `GET /api/enroll` | admin | public base URL + worker token for the enroll command |
 
 ## Security notes
 
