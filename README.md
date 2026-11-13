@@ -1,0 +1,153 @@
+# compute-relay
+
+A tiny self-hosted **distributed compute task runner**. Run one coordinator on a
+host with a public domain; enroll worker machines **you own or are authorized to
+manage** (your own boxes, friends' HPC rigs they've agreed to lend). Workers pull
+jobs and run them — GPU scripts, batches of Android emulators, long simulations —
+and stream output back to you.
+
+Think "a minimal self-hosted CI-runner pool," not magic. It is:
+
+- **Single-file, zero-dependency** — pure Python 3.8+ standard library on both ends.
+- **One-command deploy** on the server, **one-line enroll** on each worker.
+- **NAT-friendly** — workers only make outbound HTTPS requests (long-poll); no
+  inbound ports on the worker side.
+- **Authenticated** — a worker token to join the pool, a separate admin token to
+  submit jobs. It is never an open relay.
+- **Transparent** — the agent prints the coordinator it connects to and every
+  command it runs. No stealth, no persistence tricks, no self-propagation.
+
+> **Use it only on machines you own or have explicit permission to run on.** By
+> design the agent executes the commands the coordinator sends it, so only point
+> a worker at a coordinator you control, and only hand the worker token to people
+> whose machines you're authorized to enroll.
+
+## Architecture
+
+```
+  you ──(admin token)──▶ ┌─────────────┐ ◀──(worker token, outbound long-poll)── worker A
+   client.py             │ coordinator │ ◀───────────────────────────────────────  worker B
+                         │  server.py  │ ◀───────────────────────────────────────  worker C
+                         └─────────────┘
+```
+
+- `server.py` — the coordinator. Holds the job queue and worker registry in
+  memory, serves the worker bootstrap, and exposes the admin API.
+- `agent.py` — the worker. Registers, long-polls for jobs, runs them, streams
+  output back. Reconnects with backoff.
+- `client.py` — your CLI to submit jobs and inspect workers/results.
+- `install.sh` — the worker bootstrap the coordinator serves at `/install.sh`.
+
+## 1. Deploy the coordinator (server side)
+
+On your public host:
+
+```sh
+git clone <this-repo> compute-relay && cd compute-relay
+python3 server.py
+```
+
+That's it. It listens on `0.0.0.0:8787` and prints a generated **worker token**
+and **admin token** (persisted to `relay-tokens.json`, so restarts keep them).
+To set them yourself instead:
+
+```sh
+RELAY_WORKER_TOKEN=... RELAY_ADMIN_TOKEN=... RELAY_PORT=8787 python3 server.py
+```
+
+Put it behind your domain with TLS. Any reverse proxy works; e.g. Caddy gives
+you HTTPS in two lines:
+
+```
+relay.example.com {
+    reverse_proxy 127.0.0.1:8787
+}
+```
+
+Server environment variables:
+
+| var | default | meaning |
+|-----|---------|---------|
+| `RELAY_HOST` | `0.0.0.0` | bind address |
+| `RELAY_PORT` / `PORT` | `8787` | bind port |
+| `RELAY_WORKER_TOKEN` | generated | token workers use to join |
+| `RELAY_ADMIN_TOKEN` | generated | token you use to submit jobs |
+| `RELAY_TOKENS_FILE` | `./relay-tokens.json` | where generated tokens persist |
+
+## 2. Enroll a worker (node side)
+
+One line on each machine you want to lend to the pool:
+
+```sh
+curl -fsSL https://relay.example.com/install.sh \
+  | RELAY_SERVER=https://relay.example.com RELAY_WORKER_TOKEN=YOUR_WORKER_TOKEN sh
+```
+
+It downloads `agent.py` into `~/.compute-relay` and runs it in the foreground,
+logging what it does. To run it as a managed service instead, see
+[`deploy/compute-relay-worker.service`](deploy/compute-relay-worker.service).
+
+Worker environment variables: `RELAY_SERVER`, `RELAY_WORKER_TOKEN`,
+`RELAY_WORKER_NAME` (default: hostname), `RELAY_DIR` (default: `~/.compute-relay`).
+
+## 3. Submit jobs (your machine)
+
+```sh
+export RELAY_SERVER=https://relay.example.com
+export RELAY_ADMIN_TOKEN=YOUR_ADMIN_TOKEN
+
+python3 client.py workers                      # see who's online + their GPUs
+python3 client.py run "nvidia-smi"             # run + stream output live
+python3 client.py run --target gpu-box "python train.py --epochs 50"
+python3 client.py submit "./long_batch.sh"     # fire-and-forget, prints a job id
+python3 client.py status <job_id>              # check it later
+python3 client.py jobs                          # recent jobs
+```
+
+Useful flags on `run`/`submit`:
+
+- `--target <name|id>` pin the job to a specific worker (else any eligible one runs it)
+- `--cwd <path>` working directory on the worker
+- `--timeout <seconds>` kill the job (and its whole process tree) after N seconds
+- `--env K=V` (repeatable) extra environment variables
+- `--no-shell` exec the argv directly instead of through a shell
+- `--label <text>` a human label for the job list
+
+## HTTP API
+
+All `/api/*` endpoints require `Authorization: Bearer <token>` (worker or admin
+as noted).
+
+| method & path | token | purpose |
+|---------------|-------|---------|
+| `GET /healthz` | — | liveness |
+| `GET /install.sh`, `GET /agent.py` | — | worker bootstrap |
+| `POST /api/register` | worker | enroll, returns `worker_id` |
+| `GET /api/poll?worker_id=` | worker | long-poll for the next job |
+| `POST /api/result` | worker | stream output / report completion |
+| `POST /api/jobs` | admin | submit a job |
+| `GET /api/jobs` | admin | list jobs |
+| `GET /api/jobs/<id>` | admin | job status + accumulated output |
+| `GET /api/workers` | admin | list workers |
+
+## Security notes
+
+- Serve the coordinator over **HTTPS** so tokens aren't sent in the clear.
+- The **admin token can run commands on every worker** — keep it secret; the
+  worker token only lets a machine *join* and receive jobs.
+- Run the agent as an **unprivileged user**; the sample systemd unit adds basic
+  sandboxing you can tighten per workload.
+- State is in memory: restarting the coordinator clears the job history and
+  workers re-register on their next poll. Swap in a datastore if you need
+  durable history.
+
+## Limitations
+
+- In-memory state (no persistence across coordinator restarts).
+- At-most-once dispatch, no automatic retry of a job whose worker dies mid-run.
+- Suited to a trusted pool of a handful to a few dozen workers, not a public
+  multi-tenant service.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

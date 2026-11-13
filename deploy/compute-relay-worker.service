@@ -1,0 +1,31 @@
+# Example systemd unit to run the compute-relay worker agent as a service.
+# Install the agent first (e.g. via install.sh), then adapt paths/user below,
+# copy to /etc/systemd/system/, and: systemctl enable --now compute-relay-worker
+#
+# Runs as an unprivileged user with some sandboxing. Loosen these only as your
+# workloads actually require (e.g. GPU device access, more writable paths).
+
+[Unit]
+Description=compute-relay worker agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=relay
+Environment=RELAY_SERVER=https://relay.example.com
+Environment=RELAY_WORKER_TOKEN=CHANGE_ME
+# Environment=RELAY_WORKER_NAME=gpu-box-1
+ExecStart=/usr/bin/python3 %h/.compute-relay/agent.py
+Restart=always
+RestartSec=5
+
+# Basic hardening; relax if a workload needs more access.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.compute-relay
+
+[Install]
+WantedBy=multi-user.target
