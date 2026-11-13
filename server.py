@@ -34,6 +34,7 @@ import threading
 import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.cookies import CookieError, SimpleCookie
 from urllib.parse import urlparse, parse_qs
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -47,6 +48,14 @@ POLL_WAIT_SECONDS = 25
 WORKER_TIMEOUT_SECONDS = 90
 # Upper bound on a single artifact held in memory (bytes).
 MAX_ARTIFACT_BYTES = int(os.environ.get("RELAY_MAX_ARTIFACT_BYTES", str(512 * 1024 * 1024)))
+# Web dashboard sign-in: a one-time link (/ui#login=<token>) is exchanged for a
+# session cookie. Links are single-use and short-lived; sessions last longer.
+UI_LINK_TTL = int(os.environ.get("RELAY_UI_LINK_TTL", "600"))
+UI_SESSION_TTL = int(os.environ.get("RELAY_UI_SESSION_TTL", str(7 * 24 * 3600)))
+UI_COOKIE = "relay_ui"
+# Cookie-authenticated requests must also carry this header. Cross-site forms
+# cannot set custom headers, so this blocks CSRF even where SameSite doesn't.
+UI_HEADER = "X-Relay-UI"
 
 
 class State:
@@ -59,6 +68,8 @@ class State:
         self.pending = []          # job_ids waiting to be claimed
         self.sessions = {}         # session_id -> session dict
         self.artifacts = {}        # artifact_id -> artifact dict
+        self.ui_links = {}         # one-time dashboard sign-in token -> expiry
+        self.ui_sessions = {}      # dashboard session id (cookie) -> expiry
 
     # --- workers -------------------------------------------------------
     def register_worker(self, name, caps):
@@ -197,6 +208,42 @@ class State:
                                   "error", "created_at")}
 
 
+    # --- dashboard sign-in ---------------------------------------------
+    def mint_ui_link(self):
+        with self.cond:
+            now = time.time()
+            for tok in [t for t, exp in self.ui_links.items() if exp < now]:
+                del self.ui_links[tok]
+            tok = secrets.token_urlsafe(32)
+            self.ui_links[tok] = now + UI_LINK_TTL
+            return tok
+
+    def redeem_ui_link(self, tok):
+        """Trade a sign-in link token for a new session id (or None)."""
+        with self.cond:
+            exp = self.ui_links.pop(tok, None)   # single use, even if expired
+            if not exp or exp < time.time():
+                return None
+            now = time.time()
+            for sid in [s for s, e in self.ui_sessions.items() if e < now]:
+                del self.ui_sessions[sid]
+            sid = secrets.token_urlsafe(32)
+            self.ui_sessions[sid] = now + UI_SESSION_TTL
+            return sid
+
+    def ui_session_valid(self, sid):
+        with self.cond:
+            exp = self.ui_sessions.get(sid) if sid else None
+            if exp and exp >= time.time():
+                return True
+            self.ui_sessions.pop(sid, None)
+            return False
+
+    def end_ui_session(self, sid):
+        with self.cond:
+            self.ui_sessions.pop(sid, None)
+
+
 STATE = State()
 TOKENS = {}
 
@@ -264,9 +311,21 @@ class Handler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             return {}
 
+    def _cookie(self, name):
+        jar = SimpleCookie()
+        try:
+            jar.load(self.headers.get("Cookie", ""))
+        except CookieError:
+            return None
+        return jar[name].value if name in jar else None
+
     def _auth(self, role):
         tok = bearer(self.headers)
         if tok and secrets.compare_digest(tok, TOKENS[role]):
+            return True
+        # The dashboard authenticates with its session cookie instead.
+        if (role == "admin" and self.headers.get(UI_HEADER) == "1"
+                and STATE.ui_session_valid(self._cookie(UI_COOKIE))):
             return True
         self._read_body()  # drain so keep-alive stays sane
         self._send_json(401, {"error": "unauthorized"})
@@ -307,6 +366,12 @@ class Handler(BaseHTTPRequestHandler):
         path, qs = parsed.path, parse_qs(parsed.query)
         if path == "/api/register":
             return self._handle_register()
+        if path == "/api/ui-link":
+            return self._handle_ui_link()
+        if path == "/api/session":
+            return self._handle_ui_login()
+        if path == "/api/logout":
+            return self._handle_ui_logout()
         if path == "/api/result":
             return self._handle_result()
         if path == "/api/jobs":
@@ -362,6 +427,58 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    # Sign-in flow: an admin mints a one-time link (/ui#login=<token>); the
+    # page POSTs that token to /api/session and gets an HttpOnly session
+    # cookie. The token rides in the URL fragment, which browsers never send
+    # to the server, so it stays out of proxy access logs and Referer headers.
+    #
+    # The cookie is set without a Path, so it defaults to the directory of
+    # /api/session, i.e. /api (or <prefix>/api behind a reverse proxy that
+    # mounts the coordinator under a sub-path). The page itself needs no
+    # cookie.
+    def _set_ui_cookie(self, value, max_age):
+        attrs = [f"{UI_COOKIE}={value}", f"Max-Age={max_age}", "HttpOnly", "SameSite=Strict"]
+        if self.headers.get("X-Forwarded-Proto", "").lower() == "https":
+            attrs.append("Secure")
+        self.send_header("Set-Cookie", "; ".join(attrs))
+
+    def _handle_ui_link(self):
+        if not self._auth("admin"):
+            return
+        self._read_body()
+        tok = STATE.mint_ui_link()
+        print("[ui] minted a one-time sign-in link", flush=True)
+        self._send_json(200, {"login_token": tok, "path": f"ui#login={tok}",
+                              "expires_in": UI_LINK_TTL})
+
+    def _handle_ui_login(self):
+        data = self._read_json()
+        sid = STATE.redeem_ui_link(str(data.get("login") or ""))
+        if not sid:
+            return self._send_json(401, {"error": "sign-in link is invalid, expired, or already used"})
+        print("[ui] dashboard session started", flush=True)
+        body = json.dumps({"ok": True, "expires_in": UI_SESSION_TTL}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self._set_ui_cookie(sid, UI_SESSION_TTL)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _handle_ui_logout(self):
+        self._read_body()
+        if self.headers.get(UI_HEADER) != "1":
+            return self._send_json(403, {"error": f"{UI_HEADER} header required"})
+        STATE.end_ui_session(self._cookie(UI_COOKIE))
+        body = b'{"ok": true}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self._set_ui_cookie("", 0)
         self.end_headers()
         self.wfile.write(body)
 
@@ -650,10 +767,13 @@ HELP_PAGE = """compute-relay coordinator is running.
 
 Self-hosted distributed task runner: one-shot jobs, PTY-backed interactive
 sessions, and binary artifacts (screenshots, recordings). See the repository
-README. Web dashboard: /ui (sign in with the admin token). Endpoints:
+README. Web dashboard: /ui (open a sign-in link: `client.py ui`). Endpoints:
 
   GET  /healthz                         liveness
-  GET  /ui                              web dashboard               (public page, admin API)
+  GET  /ui                              web dashboard               (public page)
+  POST /api/ui-link                     mint a one-time sign-in link (admin)
+  POST /api/session                     redeem a link for a cookie  (link token)
+  POST /api/logout                      end the dashboard session   (cookie)
   GET  /install.sh  /agent.py           worker bootstrap            (public)
   POST /api/register                    worker enroll               (worker)
   GET  /api/poll                        worker control channel      (worker)
@@ -686,7 +806,11 @@ def main():
     print(f"  admin  token: {TOKENS['admin']}", flush=True)
     print("Give the worker token (with your server URL) to machines you enroll.", flush=True)
     print("Keep the admin token private: it can submit jobs and open sessions.", flush=True)
-    print(f"Web dashboard: http://{host}:{port}/ui (sign in with the admin token)", flush=True)
+    public = os.environ.get("RELAY_PUBLIC_URL", "").rstrip("/") or \
+        f"http://{'127.0.0.1' if host in ('0.0.0.0', '') else host}:{port}"
+    print(f"Web dashboard sign-in link (one-time, expires in {UI_LINK_TTL // 60} min):", flush=True)
+    print(f"  {public}/ui#login={STATE.mint_ui_link()}", flush=True)
+    print("  Get a fresh link any time with: python3 client.py ui", flush=True)
     print("=" * 64, flush=True)
     try:
         httpd.serve_forever()

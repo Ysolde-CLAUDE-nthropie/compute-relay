@@ -12,6 +12,7 @@ Examples:
   client.py workers
   client.py run "nvidia-smi"
   client.py run --target gpu-box "python train.py"
+  client.py ui --open             # one-time sign-in link for the web dashboard
 
   # interactive, stateful session (e.g. an adb shell on a specific node)
   client.py session shell --target pixel-host --cmd "adb shell"
@@ -34,6 +35,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import webbrowser
 
 SERVER = os.environ.get("RELAY_SERVER", "").rstrip("/")
 TOKEN = os.environ.get("RELAY_ADMIN_TOKEN", "")
@@ -182,6 +184,17 @@ def _download_artifact(artifact_id, out_path, wait=True, timeout=600):
         f.write(body)
     print(f"saved {len(body)} bytes -> {out_path} ({meta['content_type']})",
           file=sys.stderr)
+
+
+def cmd_ui(args):
+    code, data = _request("POST", "/api/ui-link", {})
+    if code != 200:
+        die(data.get("error"))
+    link = f"{SERVER}/{data['path']}"
+    print(link)
+    print(f"[one-time sign-in link, expires in {data['expires_in'] // 60} min]", file=sys.stderr)
+    if args.open:
+        webbrowser.open(link)
 
 
 def cmd_artifacts(args):
@@ -358,6 +371,11 @@ def build_parser():
     sp.add_argument("--binary-out", metavar="FILE",
                     help="capture the command's stdout as binary into FILE")
     sp.set_defaults(fn=cmd_run)
+
+    # web dashboard
+    sp = sub.add_parser("ui", help="print a one-time sign-in link for the web dashboard")
+    sp.add_argument("--open", action="store_true", help="also open it in a browser")
+    sp.set_defaults(fn=cmd_ui)
 
     # artifacts
     sub.add_parser("artifacts", help="list artifacts").set_defaults(fn=cmd_artifacts)

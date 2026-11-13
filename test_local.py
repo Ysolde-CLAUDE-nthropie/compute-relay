@@ -57,6 +57,7 @@ def main():
         "RELAY_WORKER_TOKEN": WORKER_TOKEN,
         "RELAY_ADMIN_TOKEN": ADMIN_TOKEN,
         "RELAY_TOKENS_FILE": "/tmp/relay-test-tokens.json",
+        "RELAY_UI_LINK_TTL": "3",
     })
 
     server = subprocess.Popen([sys.executable, os.path.join(HERE, "server.py")],
@@ -231,6 +232,63 @@ def main():
         listed = {j["id"]: j for j in data["jobs"]}[job_id]
         assert listed["command"] and "finished_at" in listed and "target" in listed
         print("OK: job list includes command, target and timestamps")
+
+        # --- dashboard sign-in: one-time link -> session cookie ----------
+        def raw(method, path, body=None, headers=None):
+            data = json.dumps(body).encode() if body is not None else None
+            req = urllib.request.Request(f"{BASE}{path}", data=data, method=method,
+                                         headers=headers or {})
+            try:
+                resp = urllib.request.urlopen(req, timeout=10)
+                return resp.getcode(), resp.headers, json.loads(resp.read() or b"{}")
+            except urllib.error.HTTPError as e:
+                return e.code, e.headers, json.loads(e.read() or b"{}")
+
+        code, _, _ = raw("POST", "/api/ui-link")
+        assert code == 401, f"minting a link without auth gave {code}"
+        _, link = api("POST", "/api/ui-link", {})
+        assert link["path"] == f"ui#login={link['login_token']}", link
+        code, hdrs, _ = raw("POST", "/api/session", {"login": link["login_token"]})
+        assert code == 200, f"redeem gave {code}"
+        set_cookie = hdrs["Set-Cookie"]
+        assert set_cookie.startswith("relay_ui=") and "HttpOnly" in set_cookie \
+            and "SameSite=Strict" in set_cookie and "Path" not in set_cookie, set_cookie
+        cookie = set_cookie.split(";", 1)[0]
+        ui = {"Cookie": cookie, "X-Relay-UI": "1"}
+        code, _, data = raw("GET", "/api/workers", headers=ui)
+        assert code == 200 and data["workers"], f"cookie auth gave {code}"
+        code, _, _ = raw("GET", "/api/workers", headers={"Cookie": cookie})
+        assert code == 401, f"cookie without the CSRF header gave {code}"
+        code, _, data = raw("POST", "/api/jobs", {"command": "echo via-cookie"}, headers=ui)
+        assert code == 200 and data.get("job_id"), "cookie session can submit jobs"
+        code, _, _ = raw("POST", "/api/session", {"login": link["login_token"]})
+        assert code == 401, "a sign-in link must work only once"
+        code, _, _ = raw("POST", "/api/session", {"login": "made-up"})
+        assert code == 401
+        code, _, _ = raw("GET", "/api/workers",
+                         headers={"Cookie": "relay_ui=forged", "X-Relay-UI": "1"})
+        assert code == 401, "forged session cookie accepted"
+        code, _, _ = raw("POST", "/api/register", {"name": "x"}, headers=ui)
+        assert code == 401, "dashboard cookie must not grant the worker role"
+        print("OK: sign-in link redeemed once for an HttpOnly cookie; CSRF header enforced")
+
+        _, hdrs, _ = raw("POST", "/api/session",
+                         {"login": api("POST", "/api/ui-link", {})[1]["login_token"]},
+                         headers={"X-Forwarded-Proto": "https"})
+        assert "Secure" in hdrs["Set-Cookie"], hdrs["Set-Cookie"]
+        print("OK: cookie marked Secure behind an HTTPS proxy")
+
+        code, hdrs, _ = raw("POST", "/api/logout", {}, headers=ui)
+        assert code == 200 and "Max-Age=0" in hdrs["Set-Cookie"], hdrs["Set-Cookie"]
+        code, _, _ = raw("GET", "/api/workers", headers=ui)
+        assert code == 401, "session still valid after logout"
+        print("OK: logout ends the session server-side")
+
+        _, stale = api("POST", "/api/ui-link", {})
+        time.sleep(3.5)
+        code, _, _ = raw("POST", "/api/session", {"login": stale["login_token"]})
+        assert code == 401, "expired sign-in link accepted"
+        print("OK: sign-in links expire")
 
     except Exception as e:
         failures.append(f"{type(e).__name__}: {e}")

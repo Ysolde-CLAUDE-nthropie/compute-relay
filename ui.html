@@ -74,9 +74,9 @@ details.more summary { cursor: pointer; color: var(--muted); font-size: 12.5px; 
 
 /* login */
 .login { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
-.login-card { width: 100%; max-width: 380px; background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 28px; box-shadow: var(--shadow); }
+.login-card { width: 100%; max-width: 460px; background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 28px; box-shadow: var(--shadow); }
 .login-card .brand { margin-bottom: 18px; }
-.login-card p { margin: 0 0 18px; color: var(--muted); }
+.login-card p { margin: 0 0 14px; color: var(--muted); }
 .error-text { color: var(--err); font-size: 13px; min-height: 18px; margin: 8px 0 0; }
 
 /* top bar */
@@ -239,23 +239,20 @@ td .sub { display: block; color: var(--muted); font-size: 12px; }
 </head>
 <body>
 
-<div id="login" class="login" hidden>
-  <form id="login-form" class="login-card" autocomplete="off">
+<div id="gate" class="login" hidden>
+  <div class="login-card">
     <div class="brand">
       <svg width="26" height="26" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" fill="#3b5bdb"/><path d="M8 16h14M17 10l6 6-6 6" stroke="#fff" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
       compute-relay
     </div>
-    <p>Sign in with the coordinator's <strong>admin token</strong>, which <code>server.py</code> prints at startup and saves to <code>relay-tokens.json</code>.</p>
-    <div class="field">
-      <label for="login-token">Admin token</label>
-      <input id="login-token" name="token" type="password" spellcheck="false" autocomplete="off" required>
+    <h2 id="gate-title" style="margin-bottom:8px">Open the dashboard with a sign-in link</h2>
+    <p id="gate-msg" class="error-text" role="alert" style="margin:0 0 12px"></p>
+    <p>Sign-in links are one-time and expire after a few minutes. <code>server.py</code> prints one at startup. To get a fresh one, run this wherever you use the CLI:</p>
+    <div class="snippet-wrap">
+      <pre class="snippet" id="gate-cmd"></pre>
+      <button class="sm copy" type="button" data-copy="gate-cmd">Copy</button>
     </div>
-    <div class="field">
-      <label class="check"><input type="checkbox" name="remember" checked> Stay signed in for this browser tab</label>
-    </div>
-    <button class="primary" type="submit" style="width:100%; justify-content:center">Connect</button>
-    <p id="login-error" class="error-text" role="alert"></p>
-  </form>
+  </div>
 </div>
 
 <div id="app" hidden>
@@ -468,12 +465,11 @@ td .sub { display: block; color: var(--muted); font-size: 12px; }
 
 // The UI is served at <prefix>/ui, so API calls resolve against <prefix>/.
 const BASE = location.pathname.replace(/ui\/?$/, '');
-const TOKEN_KEY = 'compute-relay.admin-token';
 const REFRESH_MS = 3000;
 const TABS = ['workers', 'jobs', 'sessions', 'artifacts'];
 
 const state = {
-  token: null,
+  authed: false,
   tab: 'workers',
   workers: [], jobs: [], sessions: [], artifacts: [],
   loaded: false, lastSync: 0, syncError: null, skew: 0,
@@ -508,7 +504,8 @@ function h(tag, attrs, ...kids) {
 class AuthError extends Error {}
 
 async function api(method, path, body, raw = false) {
-  const opts = { method, cache: 'no-store', headers: { Authorization: `Bearer ${state.token}` } };
+  // Auth is the HttpOnly session cookie; the header is the server's CSRF check.
+  const opts = { method, cache: 'no-store', credentials: 'same-origin', headers: { 'X-Relay-UI': '1' } };
   if (body !== undefined) {
     opts.headers['Content-Type'] = 'application/json';
     opts.body = JSON.stringify(body);
@@ -516,7 +513,10 @@ async function api(method, path, body, raw = false) {
   const res = await fetch(BASE + path, opts);
   const date = Date.parse(res.headers.get('Date') || '');
   if (!Number.isNaN(date)) state.skew = date / 1000 - Date.now() / 1000;
-  if (res.status === 401) throw new AuthError('The coordinator rejected the admin token.');
+  if (res.status === 401) {
+    const data = await res.json().catch(() => ({}));
+    throw new AuthError(data.error || 'unauthorized');
+  }
   if (raw && res.ok) return res;
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
@@ -524,7 +524,7 @@ async function api(method, path, body, raw = false) {
 }
 
 function fail(err) {
-  if (err instanceof AuthError) return signOut(err.message);
+  if (err instanceof AuthError) return lockOut();
   toast(err.message || String(err), 'error');
 }
 
@@ -610,72 +610,58 @@ async function copyText(text, btn) {
   if (btn) { const t = btn.textContent; btn.textContent = 'Copied'; setTimeout(() => { btn.textContent = t; }, 1400); }
 }
 
-function storage() {
-  try { return window.sessionStorage; } catch { return null; }
-}
-
 // ---------------------------------------------------------------- auth
-function showLogin(message) {
+// There is no login form: the dashboard is opened from a one-time link
+// (ui#login=<token>, from server.py's startup output or `client.py ui`),
+// which the page trades for an HttpOnly session cookie.
+function showGate(title, message) {
   $('#app').hidden = true;
   $('#drawer').hidden = true;
-  $('#login').hidden = false;
-  $('#login-error').textContent = message || '';
-  $('#login-token').focus();
+  $('#gate').hidden = false;
+  $('#gate-title').textContent = title || 'Open the dashboard with a sign-in link';
+  $('#gate-msg').textContent = message || '';
+  $('#gate-msg').hidden = !message;
+  const server = location.origin + BASE.replace(/\/$/, '');
+  $('#gate-cmd').textContent =
+    `export RELAY_SERVER=${server}\nexport RELAY_ADMIN_TOKEN=...   # the admin token\npython3 client.py ui --open`;
 }
 
-async function signIn(token, remember) {
-  state.token = token;
-  await api('GET', 'api/workers');
-  if (remember) { try { storage()?.setItem(TOKEN_KEY, token); } catch {} }
-  $('#login').hidden = true;
+function enter() {
+  state.authed = true;
+  $('#gate').hidden = true;
   $('#app').hidden = false;
-  $('#login-token').value = '';
   route();
   refresh();
 }
 
-function signOut(message) {
+function lockOut(title = 'Your session has ended',
+                 message = 'It expired, you signed out, or the coordinator restarted. Open a new sign-in link to continue.') {
   clearTimeout(state.refreshTimer);
   clearTimeout(state.termTimer);
-  try { storage()?.removeItem(TOKEN_KEY); } catch {}
-  Object.assign(state, { token: null, workers: [], jobs: [], sessions: [], artifacts: [],
+  Object.assign(state, { authed: false, workers: [], jobs: [], sessions: [], artifacts: [],
                          loaded: false, term: {}, session: null });
   closeDrawer(false);
-  showLogin(message);
+  showGate(title, message);
 }
 
-$('#login-form').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const fd = new FormData(e.target);
-  const token = String(fd.get('token') || '').trim();
-  if (!token) return;
-  const btn = e.target.querySelector('button[type=submit]');
-  btn.disabled = true;
-  $('#login-error').textContent = '';
-  try {
-    await signIn(token, fd.get('remember') === 'on');
-  } catch (err) {
-    state.token = null;
-    $('#login-error').textContent = err instanceof AuthError
-      ? 'That token was rejected. Use the admin token, not the worker token.'
-      : `Could not reach the coordinator: ${err.message}`;
-  } finally {
-    btn.disabled = false;
-  }
-});
-$('#signout').addEventListener('click', () => signOut());
+async function signOut() {
+  try { await api('POST', 'api/logout', {}); } catch {}
+  lockOut('Signed out', 'Open a new sign-in link to come back.');
+}
+
+$('#signout').addEventListener('click', signOut);
 
 // ---------------------------------------------------------------- data
 async function refresh() {
   clearTimeout(state.refreshTimer);
-  if (!state.token) return;
+  if (!state.authed) return;
   if (!document.hidden) {
     try {
       const [w, j, s, a] = await Promise.all([
         api('GET', 'api/workers'), api('GET', 'api/jobs'),
         api('GET', 'api/sessions'), api('GET', 'api/artifacts'),
       ]);
-      if (!state.token) return;
+      if (!state.authed) return;
       state.workers = w.workers || [];
       state.jobs = j.jobs || [];
       state.sessions = s.sessions || [];
@@ -685,7 +671,7 @@ async function refresh() {
       state.syncError = null;
       render();
     } catch (err) {
-      if (err instanceof AuthError) return signOut(err.message);
+      if (err instanceof AuthError) return lockOut();
       state.syncError = err.message || 'unreachable';
     }
     renderSync();
@@ -693,7 +679,7 @@ async function refresh() {
   state.refreshTimer = setTimeout(refresh, REFRESH_MS);
 }
 const refreshSoon = () => { clearTimeout(state.refreshTimer); state.refreshTimer = setTimeout(refresh, 250); };
-document.addEventListener('visibilitychange', () => { if (!document.hidden && state.token) refresh(); });
+document.addEventListener('visibilitychange', () => { if (!document.hidden && state.authed) refresh(); });
 
 function renderSync() {
   const dot = $('#sync-dot'), text = $('#sync-text');
@@ -715,7 +701,7 @@ function navigate(tab, id) {
 }
 
 function route() {
-  if (!state.token) return;
+  if (!state.authed) return;
   const [, rawTab, rawId] = location.hash.match(/^#\/([a-z]+)(?:\/([^/]+))?/) || [];
   const tab = TABS.includes(rawTab) ? rawTab : 'workers';
   const id = rawId ? decodeURIComponent(rawId) : null;
@@ -989,7 +975,7 @@ async function pollSession() {
   clearTimeout(state.termTimer);
   state.termTimer = null;
   const id = state.session;
-  if (!id || state.tab !== 'sessions' || !state.token) return;
+  if (!id || state.tab !== 'sessions' || !state.authed) return;
   if (state.termBusy) { state.termAgain = true; return; }
   const t = state.term[id];
   const since = t.since;
@@ -999,7 +985,7 @@ async function pollSession() {
     s = await api('GET', `api/sessions/${encodeURIComponent(id)}?since=${since}`);
   } catch (err) {
     state.termBusy = false;
-    if (err instanceof AuthError) return signOut(err.message);
+    if (err instanceof AuthError) return lockOut();
     if (id === state.session) {
       t.info = t.info || { id, status: 'error' };
       t.error = err.message;
@@ -1210,7 +1196,7 @@ async function pollJobDrawer(gen) {
       api('GET', `api/artifacts/${encodeURIComponent(aid)}?meta=1`).catch(() => ({ id: aid, status: 'error', error: 'unavailable' }))));
   } catch (err) {
     if (gen !== drawer.gen) return;
-    if (err instanceof AuthError) return signOut(err.message);
+    if (err instanceof AuthError) return lockOut();
     return setDrawerBody(h('p', { class: 'error-text' }, err.message));
   }
   if (gen !== drawer.gen) return;
@@ -1255,7 +1241,7 @@ async function pollArtifactDrawer(gen) {
     a = await api('GET', `api/artifacts/${encodeURIComponent(id)}?meta=1`);
   } catch (err) {
     if (gen !== drawer.gen) return;
-    if (err instanceof AuthError) return signOut(err.message);
+    if (err instanceof AuthError) return lockOut();
     return setDrawerBody(h('p', { class: 'error-text' }, err.message));
   }
   if (gen !== drawer.gen) return;
@@ -1341,17 +1327,33 @@ function artifactCard(a, gen, expanded = false) {
 // ---------------------------------------------------------------- misc
 document.querySelectorAll('[data-copy]').forEach((b) =>
   b.addEventListener('click', () => copyText($('#' + b.dataset.copy).textContent, b)));
-setInterval(() => { if (state.token) renderSync(); }, 1000);
+setInterval(() => { if (state.authed) renderSync(); }, 1000);
+
+// Pasting a new sign-in link into an open tab only changes the fragment.
+window.addEventListener('hashchange', () => { if (location.hash.startsWith('#login=')) location.reload(); });
 
 (async function boot() {
-  const saved = (() => { try { return storage()?.getItem(TOKEN_KEY); } catch { return null; } })();
-  if (!saved) return showLogin();
-  try {
-    await signIn(saved, true);
-  } catch (err) {
-    state.token = null;
-    showLogin(err instanceof AuthError ? 'Your saved token is no longer valid. Sign in again.' : `Could not reach the coordinator: ${err.message}`);
+  const m = location.hash.match(/^#login=([A-Za-z0-9_-]+)$/);
+  let linkError = null;
+  if (m) {
+    // Drop the token from the address bar and history before anything else.
+    history.replaceState(null, '', location.pathname + location.search);
+    try {
+      await api('POST', 'api/session', { login: m[1] });
+    } catch (err) {
+      linkError = err instanceof AuthError
+        ? 'This sign-in link has expired or was already used.'
+        : `Could not reach the coordinator: ${err.message}`;
+    }
   }
+  try {
+    await api('GET', 'api/workers');
+  } catch (err) {
+    if (err instanceof AuthError) return showGate(undefined, linkError || '');
+    return showGate('Cannot reach the coordinator', err.message);
+  }
+  enter();
+  if (linkError) toast('That sign-in link was already used or expired, but this browser is still signed in.');
 })();
 </script>
 </body>

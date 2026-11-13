@@ -83,6 +83,9 @@ Server environment variables:
 | `RELAY_WORKER_TOKEN` | generated | token workers use to join |
 | `RELAY_ADMIN_TOKEN` | generated | token you use to submit jobs |
 | `RELAY_TOKENS_FILE` | `./relay-tokens.json` | where generated tokens persist |
+| `RELAY_PUBLIC_URL` | `http://127.0.0.1:<port>` | base URL used in the printed dashboard link |
+| `RELAY_UI_LINK_TTL` | `600` | seconds a one-time dashboard sign-in link stays valid |
+| `RELAY_UI_SESSION_TTL` | `604800` | seconds a dashboard session cookie stays valid |
 
 ## 2. Enroll a worker (node side)
 
@@ -126,9 +129,17 @@ Useful flags on `run`/`submit`:
 
 ### Web dashboard
 
-The coordinator also serves a browser dashboard at **`/ui`**
-(e.g. `https://relay.example.com/ui`). Sign in with the admin token. From the
-dashboard you can:
+The coordinator also serves a browser dashboard at **`/ui`**. There is no
+login form: you open it from a **one-time sign-in link**, which the browser
+trades for a session cookie. `server.py` prints a link at startup; mint a
+fresh one any time with:
+
+```sh
+python3 client.py ui          # prints https://relay.example.com/ui#login=...
+python3 client.py ui --open   # ...and opens it in your browser
+```
+
+From the dashboard you can:
 
 - **Workers**: who's online or busy, their platform, CPUs and GPUs, plus the
   enroll one-liner for new machines.
@@ -140,13 +151,26 @@ dashboard you can:
 - **Artifacts**: pull files, take screenshots, and preview images, video and
   text inline or download them.
 
+How sign-in works:
+
+- A link works **once** and expires after 10 minutes (`RELAY_UI_LINK_TTL`).
+  Its token sits in the URL fragment (`#login=...`), which browsers never send
+  to the server. That keeps it out of proxy access logs and `Referer` headers,
+  and the page removes it from the address bar as soon as it loads.
+- The page swaps the token for a random session id held in an `HttpOnly`,
+  `SameSite=Strict` cookie, marked `Secure` when your proxy sends
+  `X-Forwarded-Proto: https`. Page scripts can't read it, and the admin token
+  itself never reaches the browser.
+- Sessions last 7 days (`RELAY_UI_SESSION_TTL`) and end when you sign out or
+  the coordinator restarts (they're held in memory, like everything else).
+- A cookie only authenticates requests that also carry an `X-Relay-UI` header.
+  Cross-site forms can't set that header, which blocks CSRF. Bearer-token auth
+  for the CLI and workers is unchanged.
+
 It's a single static file (`ui.html`) with no build step and no external
-requests. The page carries no secrets; every call it makes uses the admin
-token you enter, and the token is kept only in that browser tab's
-`sessionStorage`. The coordinator serves it with a strict Content-Security-Policy
-(the page's script pinned by hash, same-origin requests only), so text
-reported by workers can only ever be displayed, never executed. Serve the
-coordinator over HTTPS so the token isn't sent in the clear.
+requests. The coordinator serves it with a strict Content-Security-Policy (the
+page's script pinned by hash, same-origin requests only), so text reported by
+workers can only ever be displayed, never executed.
 
 ## 4. Stateful sessions (interactive debugging)
 
@@ -203,12 +227,16 @@ uploaded in chunks and held in memory on the coordinator (cap set by
 ## HTTP API
 
 All `/api/*` endpoints require `Authorization: Bearer <token>` (worker or admin
-as noted).
+as noted). Admin endpoints also accept the dashboard's session cookie together
+with an `X-Relay-UI: 1` header.
 
 | method & path | token | purpose |
 |---------------|-------|---------|
 | `GET /healthz` | — | liveness |
-| `GET /ui` | — (page) / admin (API) | web dashboard |
+| `GET /ui` | — | web dashboard page |
+| `POST /api/ui-link` | admin | mint a one-time dashboard sign-in link |
+| `POST /api/session` | link token (body) | redeem a link for a session cookie |
+| `POST /api/logout` | session cookie | end the dashboard session |
 | `GET /install.sh`, `GET /agent.py` | — | worker bootstrap |
 | `POST /api/register` | worker | enroll, returns `worker_id` |
 | `GET /api/poll?worker_id=` | worker | long-poll for the next job |
