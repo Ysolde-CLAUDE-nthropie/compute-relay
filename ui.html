@@ -155,6 +155,16 @@ main { max-width: 1280px; margin: 0 auto; padding: 22px 20px 60px; }
 .snippet-wrap .copy:hover { background: #2c3440; }
 .enroll { margin-top: 22px; }
 .enroll ol { margin: 10px 0 0; padding-left: 18px; color: var(--muted); font-size: 13px; }
+/* OS tabs for the enroll command. Deliberately not `.tabs`, which is the
+   header nav. */
+.enroll-os { display: flex; gap: 6px; margin: 0 0 10px; }
+.enroll-os button {
+  background: var(--panel); color: var(--muted); border: 1px solid var(--border);
+  border-radius: 6px; padding: 4px 12px; font: inherit; font-size: 12.5px; cursor: pointer;
+}
+.enroll-os button[aria-selected="true"] {
+  background: var(--accent); border-color: var(--accent); color: #fff;
+}
 
 /* tables */
 .toolbar { display: flex; gap: 8px; align-items: center; padding: 12px 14px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
@@ -285,15 +295,33 @@ td .sub { display: block; color: var(--muted); font-size: 12px; }
       <div class="grid" id="worker-grid"></div>
       <div class="card card-pad enroll">
         <h2>Enroll a worker</h2>
-        <p class="muted small" style="margin:6px 0 10px">Run this on a machine you own or are authorized to manage. It downloads <code>agent.py</code> and runs it in the foreground.</p>
+        <p class="muted small" style="margin:6px 0 10px">
+          Run this on a machine you own or are authorized to manage. The command already
+          carries this pool's worker token; it downloads <code>agent.py</code> and starts it.
+        </p>
+        <div class="enroll-os" role="tablist">
+          <button role="tab" aria-selected="true" data-os="linux">Linux</button>
+          <button role="tab" aria-selected="false" data-os="macos">macOS</button>
+          <button role="tab" aria-selected="false" data-os="windows">Windows</button>
+        </div>
         <div class="snippet-wrap">
-          <pre class="snippet" id="enroll-cmd"></pre>
+          <pre class="snippet" id="enroll-cmd">…</pre>
           <button class="sm copy" type="button" data-copy="enroll-cmd">Copy</button>
         </div>
+        <div class="snippet-wrap" style="margin-top:10px">
+          <pre class="snippet" id="enroll-cmd-service"></pre>
+          <button class="sm copy" type="button" data-copy="enroll-cmd-service">Copy</button>
+        </div>
         <ol>
-          <li>Replace <code>YOUR_WORKER_TOKEN</code> with the <em>worker</em> token. The admin token never goes on workers.</li>
-          <li>Set <code>RELAY_WORKER_NAME</code> to give it a stable name (default: hostname).</li>
+          <li>The first command runs the agent in the foreground (Ctrl-C to stop).</li>
+          <li>The second installs it as a service so it survives reboot.</li>
+          <li>Set <code>RELAY_WORKER_NAME</code> to give the machine a stable name
+              (default: hostname).</li>
         </ol>
+        <p class="muted small" style="margin:10px 0 0">
+          The worker token can add machines to this pool, so treat it as sensitive.
+          The <b>admin</b> token is never put on a worker.
+        </p>
       </div>
     </section>
 
@@ -478,6 +506,8 @@ const state = {
   term: {},               // session id -> { raw, since, info }
   termTimer: null, refreshTimer: null,
   history: [], histPos: 0,
+  enrollOS: 'linux',      // enroll tab
+  enroll: null,           // {server, worker_token} from /api/enroll
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -632,6 +662,7 @@ function enter() {
   $('#app').hidden = false;
   route();
   refresh();
+  loadEnroll();
 }
 
 function lockOut(title = 'Your session has ended',
@@ -809,10 +840,116 @@ function renderWorkers() {
   } else {
     grid.replaceChildren(...names.map(workerCard));
   }
-  const server = location.origin + BASE.replace(/\/$/, '');
-  $('#enroll-cmd').textContent =
-    `curl -fsSL ${server}/install.sh \\\n  | RELAY_SERVER=${server} RELAY_WORKER_TOKEN=YOUR_WORKER_TOKEN sh`;
+  renderEnroll();
 }
+
+// ---- enroll commands -------------------------------------------------
+// Filled from GET /api/enroll, so the token is already in the command and
+// nobody has to paste it by hand. Falls back to a placeholder if that request
+// fails, so the card never shows a half-built command.
+function enrollText() {
+  const e = state.enroll;
+  const os = state.enrollOS;
+  if (!e) {
+    return 'Loading the enroll command…';
+  }
+  const srv = e.server;
+  const tok = e.worker_token;
+  const name = 'RELAY_WORKER_NAME=my-box';
+  if (os === 'windows') {
+    return `$env:RELAY_SERVER='${srv}'; $env:RELAY_WORKER_TOKEN='${tok}'\n` +
+           `curl.exe -sSLo "$env:TEMP\\agent.py" "${srv}/agent.py"\n` +
+           `$env:${name}\npython "$env:TEMP\\agent.py"`;
+  }
+  return `export RELAY_SERVER=${srv}\n` +
+         `export RELAY_WORKER_TOKEN=${tok}\n` +
+         `export ${name}\n` +
+         'curl -fsSL "$RELAY_SERVER/agent.py" -o ~/.compute-relay-agent.py\n' +
+         'python3 ~/.compute-relay-agent.py';
+}
+
+function enrollServiceText() {
+  const e = state.enroll;
+  const os = state.enrollOS;
+  if (!e) return '';
+  const srv = e.server;
+  const tok = e.worker_token;
+  if (os === 'windows') {
+    return `# Run once, in an elevated PowerShell, to start at logon:\n` +
+           `$a = New-ScheduledTaskAction -Execute 'pythonw.exe' ` +
+           `-Argument '"%USERPROFILE%\\.compute-relay-agent.py"'\n` +
+           `$t = New-ScheduledTaskTrigger -AtLogOn\n` +
+           `$s = New-ScheduledTaskSettingsSet -StartWhenAvailable -RestartCount 999 ` +
+           `-RestartInterval (New-TimeSpan -Minutes 1)\n` +
+           `Register-ScheduledTask -TaskName compute-relay-worker -Action $a -Trigger $t -Settings $s -Force\n` +
+           `# Set RELAY_SERVER / RELAY_WORKER_TOKEN as user environment variables first.`;
+  }
+  if (os === 'macos') {
+    return `# launchd agent: survives logout and restarts on failure\n` +
+           `mkdir -p ~/Library/LaunchAgents\n` +
+           `cat > ~/Library/LaunchAgents/com.compute-relay.worker.plist <<'PLIST'\n` +
+           `<?xml version="1.0" encoding="UTF-8"?>\n` +
+           `<plist version="1.0"><dict>\n` +
+           `  <key>Label</key><string>com.compute-relay.worker</string>\n` +
+           `  <key>ProgramArguments</key><array>\n` +
+           `    <string>${whichPython()}</string><string>${'${HOME}'}/.compute-relay-agent.py</string>\n` +
+           `  </array>\n` +
+           `  <key>EnvironmentVariables</key><dict>\n` +
+           `    <key>RELAY_SERVER</key><string>${srv}</string>\n` +
+           `    <key>RELAY_WORKER_TOKEN</key><string>${tok}</string>\n` +
+           `  </dict>\n` +
+           `  <key>RunAtLoad</key><true/><key>KeepAlive</key><true/>\n` +
+           `</dict></plist>\n` +
+           `PLIST\n` +
+           `launchctl load -w ~/Library/LaunchAgents/com.compute-relay.worker.plist`;
+  }
+  return `# systemd user unit: survives reboot, runs as you (no root needed)\n` +
+         `mkdir -p ~/.config/systemd/user\n` +
+         `cat > ~/.config/systemd/user/compute-relay-worker.service <<UNIT\n` +
+         `[Unit]\nDescription=compute-relay worker\nAfter=network-online.target\n\n` +
+         `[Service]\nType=simple\n` +
+         `Environment=RELAY_SERVER=${srv}\n` +
+         `Environment=RELAY_WORKER_TOKEN=${tok}\n` +
+         `ExecStart=${whichPython()} %h/.compute-relay-agent.py\n` +
+         `Restart=always\nRestartSec=5\n\n` +
+         `[Install]\nWantedBy=default.target\nUNIT\n` +
+         `systemctl --user daemon-reload\n` +
+         `systemctl --user enable --now compute-relay-worker\n` +
+         `loginctl enable-linger "$USER"   # keep it running when you log out`;
+}
+
+function whichPython() {
+  // The agent is stdlib-only and every supported POSIX system ships python3
+  // here; we cannot probe the worker, so use the conventional absolute path.
+  return '/usr/bin/python3';
+}
+
+function renderEnroll() {
+  const a = $('#enroll-cmd');
+  const b = $('#enroll-cmd-service');
+  if (a) a.textContent = enrollText();
+  if (b) b.textContent = enrollServiceText();
+  document.querySelectorAll('.enroll-os button').forEach((btn) => {
+    btn.setAttribute('aria-selected', String(btn.dataset.os === state.enrollOS));
+  });
+}
+
+async function loadEnroll() {
+  if (state.enroll) return;
+  try {
+    state.enroll = await api('GET', 'api/enroll');
+  } catch (err) {
+    state.enroll = null;
+  }
+  renderEnroll();
+}
+
+document.addEventListener('click', (ev) => {
+  const btn = ev.target.closest('.enroll-os button');
+  if (!btn) return;
+  state.enrollOS = btn.dataset.os;
+  renderEnroll();
+});
 
 function workerCard(w) {
   const caps = w.caps || {};
